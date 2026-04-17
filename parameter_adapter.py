@@ -119,47 +119,112 @@ class OnlineParameterAdapter:
             'method': 'gradient_based'
         })
     
-    def update_rls(self, observation, measurement, adaptive_factor=0.99):
+    def update_rls(self, slip_angles, slip_ratios, Fz_kN_wheels, lateral_force_error,
+                longitudinal_force_error, adaptive_factor=0.99):
         """
-        Recursive least squares update for parameter adaptation.
-        
+        Correct RLS update. phi is the Pacejka sensitivity (dF/dB, dF/da2) at current
+        operating point — not raw state values.
+
         Args:
-            observation: state/control observation vector
-            measurement: measurement vector (observed residual)
-            adaptive_factor: forgetting factor (0.9-0.99 for online learning)
+            slip_angles:           array [alpha_fl, alpha_fr, alpha_rl, alpha_rr] in degrees
+            slip_ratios:           array [sigma_rl, sigma_rr] (longitudinal, rear only)
+            Fz_kN_wheels:          array [Fz_fl, Fz_fr, Fz_rl, Fz_rr] in kN
+            lateral_force_error:   scalar, sum of lateral force residuals (N)
+            longitudinal_force_error: scalar, sum of longitudinal force residuals (N)
+            adaptive_factor:       forgetting factor lambda
         """
-        # Observation vector dimension should match number of adaptive params
-        phi = observation[:len(self.adaptive_param_names)]  # measurement matrix
-        
-        # RLS update
-        # S = P + phi*phi^T / adaptive_factor
-        S = self.P + np.outer(phi, phi) / adaptive_factor
-        
-        try:
-            S_inv = np.linalg.inv(S)
-        except np.linalg.LinAlgError:
-            # Use pseudoinverse if singular
-            S_inv = np.linalg.pinv(S)
-        
-        # Gain: K = P * phi / (lambda + phi^T * P * phi)
-        K = (self.P @ phi) / (adaptive_factor + phi @ self.P @ phi)
-        
-        # Parameter update
-        error = measurement - (phi @ self.param_vector)
-        self.param_vector = self.param_vector + K * error
-        
-        # Apply bounds
+        phi = self._compute_pacejka_regressor(
+            slip_angles, slip_ratios, Fz_kN_wheels
+        )
+
+        # scalar measurement: total force error projected onto parameter space
+        y = np.array([lateral_force_error, longitudinal_force_error,
+                    lateral_force_error, longitudinal_force_error,
+                    0.0, 0.0, 0.0])  # mass/aero not updated from force error directly
+
+        # Standard RLS scalar update per parameter (decoupled for stability)
+        for i in range(len(self.adaptive_param_names)):
+            phi_i = phi[i]
+            if abs(phi_i) < 1e-6:
+                continue  # skip if parameter has no influence at this operating point
+
+            k_i = self.P[i, i] * phi_i / (adaptive_factor + phi_i * self.P[i, i] * phi_i)
+            error_i = y[i] - phi_i * self.param_vector[i]
+            self.param_vector[i] = self.param_vector[i] + k_i * error_i
+            self.P[i, i] = (1.0 / adaptive_factor) * (1 - k_i * phi_i) * self.P[i, i]
+            self.P[i, i] = np.clip(self.P[i, i], 1e-6, 1e4)  # prevent covariance explosion
+
         self.param_vector = self._apply_bounds(self.param_vector)
-        
-        # Update covariance
-        self.P = (1.0 / adaptive_factor) * (self.P - K[:, np.newaxis] @ phi[np.newaxis, :] @ self.P)
-        
-        # Update current params
         self.current_params = self._vector_to_params(self.param_vector)
-        
-        # Log
-        self.residual_history.append(measurement)
+        self.residual_history.append(y.copy())
         self.param_history.append(self.param_vector.copy())
+
+
+    def _compute_pacejka_regressor(self, slip_angles, slip_ratios, Fz_kN_wheels):
+        """
+        Compute dF/dtheta for each adaptive parameter at the current operating point.
+        This is the sensitivity of the tyre force output to each parameter — the correct phi.
+
+        For Pacejka: F = D * sin(C * atan(B*s - E*(B*s - atan(B*s))))
+        where D = a1*Fz + a2
+
+        dF/dB  = D * C * cos(C*atan(arg)) * s*(1-E) / (1 + arg^2)
+        dF/da2 = sin(C * atan(arg))   [since D = a1*Fz + a2, dD/da2 = 1]
+        """
+        B_lat  = self.current_params['TYRE_LAT']['B']
+        C_lat  = self.current_params['TYRE_LAT'].get('C', 1.9)
+        E_lat  = self.current_params['TYRE_LAT'].get('E', -1.5)
+        a1_lat = self.current_params['TYRE_LAT'].get('a1', -0.10)
+        a2_lat = self.current_params['TYRE_LAT']['a2']
+
+        B_lon  = self.current_params['TYRE_LON']['B']
+        C_lon  = self.current_params['TYRE_LON'].get('C', 1.65)
+        E_lon  = self.current_params['TYRE_LON'].get('E', -1.5)
+        a1_lon = self.current_params['TYRE_LON'].get('a1', -0.10)
+        a2_lon = self.current_params['TYRE_LON']['a2']
+
+        # Average over all four corners for lateral sensitivity
+        dF_dB_lat_total  = 0.0
+        dF_da2_lat_total = 0.0
+        for i, alpha in enumerate(slip_angles):
+            Fz = Fz_kN_wheels[i]
+            D = a1_lat * Fz + a2_lat
+            s = alpha  # slip angle in degrees
+            arg = B_lat * s - E_lat * (B_lat * s - np.arctan(B_lat * s))
+            darg_dB = s * (1 - E_lat) + E_lat * s / (1 + (B_lat * s) ** 2)
+            cos_term = np.cos(C_lat * np.arctan(arg))
+            dF_dB_lat  = D * C_lat * cos_term / (1 + arg ** 2) * darg_dB
+            dF_da2_lat = np.sin(C_lat * np.arctan(arg))
+            dF_dB_lat_total  += dF_dB_lat
+            dF_da2_lat_total += dF_da2_lat
+
+        # Average over rear two wheels for longitudinal sensitivity
+        dF_dB_lon_total  = 0.0
+        dF_da2_lon_total = 0.0
+        for i, sigma in enumerate(slip_ratios):
+            Fz = Fz_kN_wheels[2 + i]  # rear wheels
+            D = a1_lon * Fz + a2_lon
+            s = sigma * 100  # convert to % as used in twin_track
+            arg = B_lon * s - E_lon * (B_lon * s - np.arctan(B_lon * s))
+            darg_dB = s * (1 - E_lon) + E_lon * s / (1 + (B_lon * s) ** 2)
+            cos_term = np.cos(C_lon * np.arctan(arg))
+            dF_dB_lon  = D * C_lon * cos_term / (1 + arg ** 2) * darg_dB
+            dF_da2_lon = np.sin(C_lon * np.arctan(arg))
+            dF_dB_lon_total  += dF_dB_lon
+            dF_da2_lon_total += dF_da2_lon
+
+        # phi vector matches self.adaptive_param_names order:
+        # ['TYRE_LAT_B', 'TYRE_LAT_a2', 'TYRE_LON_B', 'TYRE_LON_a2', 'M', 'Cd', 'Cl']
+        phi = np.array([
+            dF_dB_lat_total,
+            dF_da2_lat_total,
+            dF_dB_lon_total,
+            dF_da2_lon_total,
+            0.0,   # mass: not estimated from tyre forces here
+            0.0,   # Cd: not estimated from tyre forces here
+            0.0,   # Cl: not estimated from tyre forces here
+        ])
+        return phi
     
     def adapt_from_residuals(self, residuals, controls, dt=0.05):
         """
@@ -176,9 +241,13 @@ class OnlineParameterAdapter:
         
         # Simple least squares: minimize ||residuals||^2 by adjusting parameters
         def objective(param_vec):
-            # This is a simplified objective - just minimize residual magnitude
-            # In practice, you'd recompute dynamics with new params
-            return np.linalg.norm(residuals_flat)
+            param_delta = param_vec - self._extract_vector(self.baseline_params)
+            regularisation = 0.1 * np.dot(param_delta, param_delta)
+            lat_err = float(np.mean(np.abs(residuals[:, 4]))) if residuals.ndim > 1 else 0.0
+            lon_err = float(np.mean(np.abs(residuals[:, 3]))) if residuals.ndim > 1 else 0.0
+            residual_term = (abs(lat_err) * abs(param_vec[0] - self.param_vector[0]) +
+                            abs(lon_err) * abs(param_vec[2] - self.param_vector[2]))
+            return residual_term + regularisation
         
         # Initial guess
         x0 = self.param_vector.copy()
@@ -194,7 +263,7 @@ class OnlineParameterAdapter:
             objective,
             x0,
             bounds=bounds,
-            max_nfev=10  # Very limited for online use
+            max_nfev=20  # Very limited for online use
         )
         
         # Update parameters
@@ -268,6 +337,16 @@ class TireParameterEstimator:
         # Tire slip-force measurements for fitting
         self.measurements = []
         self.measured_forces = []
+        self.param_bounds = {
+            'TYRE_LAT_B':  (10.0, 14.0),                              # was (8, 16)
+            'TYRE_LAT_a2': (1.8, 2.3),                                # was (1.5, 2.5)
+            'TYRE_LON_B':  (10.0, 14.0),
+            'TYRE_LON_a2': (1.8, 2.3),
+            'M':  (baseline_params['M'] * 0.97, baseline_params['M'] * 1.03),   # ±3% not ±15%
+            'Cd': (baseline_params['Cd'] * 0.97, baseline_params['Cd'] * 1.03),
+            'Cl': (baseline_params['Cl'] * 0.97, baseline_params['Cl'] * 1.03),
+        }
+
     
     def add_measurement(self, slip, normal_force, measured_force):
         """
@@ -350,14 +429,14 @@ if __name__ == "__main__":
     # Simulate some residuals and adapt
     print("\nSimulating adaptation...")
     for i in range(10):
-        # Simulate residual (would come from real data)
-        residual = np.random.randn(13) * 0.01
-        
-        # RLS update
-        observation = np.random.randn(7) * 0.1
-        measurement = np.random.randn(7) * 0.05
-        
-        adapter.update_rls(observation, measurement, adaptive_factor=0.95)
+        slip_angles  = np.random.uniform(-5, 5, 4)       # degrees
+        slip_ratios  = np.random.uniform(-0.1, 0.1, 2)   # dimensionless
+        Fz_kN        = np.array([2.0, 2.0, 2.2, 2.2])    # kN per wheel
+        lat_err      = np.random.randn() * 50             # Newtons
+        lon_err      = np.random.randn() * 50             # Newtons
+
+        adapter.update_rls(slip_angles, slip_ratios, Fz_kN, lat_err, lon_err,
+                           adaptive_factor=0.995)
     
     print("\nAdapted parameters:")
     changes = adapter.get_parameter_changes()
