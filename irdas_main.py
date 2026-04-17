@@ -356,8 +356,10 @@ class IRDAS:
         # Step 1: Get true state from real vehicle simulator
         
                 
+        true_state_before = self.true_state.copy()          # save BEFORE stepping
         true_state_next = self.real_simulator.step(self.true_state, control, self.dt)
         self.true_state = true_state_next.copy()
+
         # Step 2: Generate noisy measurement from true state
         measurement = self.sensor_sim.measure(true_state_next)
         
@@ -381,20 +383,73 @@ class IRDAS:
         estimated_state = self.kalman_filter.get_state()
         
         # Step 6: Compute residual for parameter adaptation
-        baseline_next = twin_track_model(self.true_state, control, self.dt, self.baseline_params)
+        baseline_next = twin_track_model(true_state_before, control, self.dt, self.baseline_params)
         model_error = true_state_next - baseline_next
         residual = np.linalg.norm(model_error)
         
         # Step 7: Parameter adaptation (optional)
         if use_param_adaptation and self.use_rls:
-                # Only adapt if model error is meaningful but not exploding
             model_error_norm = np.linalg.norm(model_error[:7])
             if 0.001 < model_error_norm < 10.0:
-                # Use normalised error signal, not raw state values
-                obs  = model_error[:7] / (model_error_norm + 1e-6)
-                meas = model_error[:7] / (model_error_norm + 1e-6)
-                self.param_adapter.update_rls(obs, meas, adaptive_factor=0.995)
+
+                # --- extract what we need from true_state (already defined above) ---
+                vx  = self.true_state[3]
+                vy  = self.true_state[4]
+                r   = self.true_state[5]
+                vw_rl = self.true_state[8]
+                vw_rr = self.true_state[9]
+
+                # --- slip angles (mirrors twin_track.py logic) ---
+                L   = self.baseline_params.get('L',  3.6)
+                MX  = self.baseline_params.get('MX', 0.453)
+                Lf  = L * MX
+                Lr  = L * (1.0 - MX)
+                delta      = float(control[0])
+                min_speed  = 0.5
+
+                alpha_front = np.degrees(np.arctan2(
+                    vy - r * Lf + delta * vx,
+                    max(abs(vx), min_speed)
+                ))
+                alpha_rear  = np.degrees(np.arctan2(
+                    vy + r * Lr,
+                    max(abs(vx), min_speed)
+                ))
+                slip_angles = np.array([alpha_front, alpha_front,
+                                        alpha_rear,  alpha_rear])
+                slip_angles = np.clip(slip_angles, -20.0, 20.0)
+
+                # --- longitudinal slip ratios (rear wheels only) ---
+                v_car = max(abs(vx), min_speed)
+                slip_ratios = np.array([
+                    (vw_rl - v_car) / v_car,
+                    (vw_rr - v_car) / v_car
+                ])
+                slip_ratios = np.clip(slip_ratios, -1.0, 1.0)
+
+                # --- approximate normal forces (static split, good enough for RLS) ---
+                M_veh = self.baseline_params.get('M',  752.0)
+                g     = 9.81
+                Fz_front = M_veh * g * Lr / L / 2.0 / 1000.0   # kN per front wheel
+                Fz_rear  = M_veh * g * Lf / L / 2.0 / 1000.0   # kN per rear wheel
+                Fz_kN_wheels = np.array([Fz_front, Fz_front, Fz_rear, Fz_rear])
+
+                # --- force residuals: vy error -> lateral, vx error -> longitudinal ---
+                lat_force_error = model_error[4] * M_veh
+                lon_force_error = model_error[3] * M_veh
+                if len(self.history['true_states']) % 400 == 0:  # print once per lap
+                    print(f"  [RLS DEBUG] lat_err={lat_force_error:.2f}N  lon_err={lon_force_error:.2f}N  "
+                        f"slip_angles={slip_angles}  model_error[:5]={model_error[:5]}")
+                self.param_adapter.update_rls(
+                    slip_angles, slip_ratios, Fz_kN_wheels,
+                    lat_force_error, lon_force_error,
+                    adaptive_factor=0.995
+                )
                 self.current_params = self.param_adapter.get_current_params()
+
+                # --- Fix 4: push adapted params back into the Kalman filter ---
+                self.kalman_filter.params = self.current_params
+                self.kalman_filter.baseline_params = self.current_params
         
         # Step 8: Log history
         self.history['true_states'].append(true_state_next.copy())

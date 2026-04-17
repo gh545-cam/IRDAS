@@ -51,7 +51,7 @@ INITIAL_STATE    = np.array([0., 0., 0., 30., 0., 0.,
                               30., 30., 30., 30., 8000., 4., 0.5])
 
 # Tyre degradation model parameters
-WEAR_RATE        = 0.012        # grip loss per lap (~1.2%)
+WEAR_RATE        = 0.007      # grip loss per lap (~1.2%)
 THERMAL_OPTIMAL  = 90.0         # optimal tyre temperature (°C)
 THERMAL_SIGMA    = 25.0         # temperature spread (°C)
 THERMAL_PENALTY  = 0.003        # grip loss per °C from optimal
@@ -95,7 +95,7 @@ def theoretical_grip(lap: int, n_laps: int) -> float:
         grip factor (1.0 = baseline, lower = degraded)
     """
     # Wear factor: linear grip loss per lap
-    wear_factor    = max(1.0 - WEAR_RATE * lap, 0.5)
+    wear_factor    = max(1.0 - WEAR_RATE * lap, 0.75)
 
     # Thermal factor: grip peaks at THERMAL_OPTIMAL
     temp           = tyre_temperature(lap, n_laps)
