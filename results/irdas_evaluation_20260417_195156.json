@@ -1,0 +1,63 @@
+{
+  "timestamp": "2026-04-17T19:51:51.775134",
+  "device": "cpu",
+  "scenarios": {
+    "highway": {
+      "avg_model_error": 6.061e-05,
+      "max_model_error": 6.062e-05,
+      "std_model_error": 0.0,
+      "avg_estimation_error": 3575.26446013,
+      "max_estimation_error": 4592.69414335,
+      "std_estimation_error": 322.49162218,
+      "n_steps": 400,
+      "total_time": 20.0,
+      "final_param_changes": {
+        "TYRE_LAT_B": 33.33333333,
+        "TYRE_LAT_a2": -26.82926829,
+        "TYRE_LON_B": -33.33333333,
+        "TYRE_LON_a2": 19.04761905,
+        "M": -15.0,
+        "Cd": -15.0,
+        "Cl": -15.0
+      }
+    },
+    "aggressive": {
+      "avg_model_error": 4.055e-05,
+      "max_model_error": 6.07e-05,
+      "std_model_error": 2.84e-05,
+      "avg_estimation_error": 3612.82546552,
+      "max_estimation_error": 3759.59669927,
+      "std_estimation_error": 69.03268506,
+      "n_steps": 300,
+      "total_time": 15.0,
+      "final_param_changes": {
+        "TYRE_LAT_B": 33.33333333,
+        "TYRE_LAT_a2": -26.82926829,
+        "TYRE_LON_B": -33.33333333,
+        "TYRE_LON_a2": 19.04761905,
+        "M": -15.0,
+        "Cd": -15.0,
+        "Cl": -15.0
+      }
+    },
+    "slalom": {
+      "avg_model_error": 6.069e-05,
+      "max_model_error": 6.077e-05,
+      "std_model_error": 6e-08,
+      "avg_estimation_error": 3597.68719734,
+      "max_estimation_error": 3820.23311968,
+      "std_estimation_error": 145.50570985,
+      "n_steps": 400,
+      "total_time": 20.0,
+      "final_param_changes": {
+        "TYRE_LAT_B": 33.33333333,
+        "TYRE_LAT_a2": -26.82926829,
+        "TYRE_LON_B": 23.61584327,
+        "TYRE_LON_a2": -28.57142857,
+        "M": 5.56500199,
+        "Cd": 15.0,
+        "Cl": -15.0
+      }
+    }
+  }
+}

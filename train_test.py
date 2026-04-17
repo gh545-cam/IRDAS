@@ -115,7 +115,7 @@ def test_scenario_1_highway_driving(irdas, duration_seconds=30):
     metrics = irdas.get_metrics()
     print("\nHighway Driving Metrics:")
     _print_metrics(metrics)
-    
+    irdas.reset()
     return metrics
 
 
@@ -182,7 +182,7 @@ def test_scenario_2_aggressive_handling(irdas, duration_seconds=20):
     metrics = irdas.get_metrics()
     print("\nAggressive Handling Metrics:")
     _print_metrics(metrics)
-    
+    irdas.reset()
     return metrics
 
 
@@ -232,7 +232,7 @@ def test_scenario_3_slalom(irdas, duration_seconds=25):
     metrics = irdas.get_metrics()
     print("\nSlalom Metrics:")
     _print_metrics(metrics)
-    
+    irdas.reset()
     return metrics
 
 

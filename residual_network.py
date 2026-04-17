@@ -81,8 +81,8 @@ class ResidualDynamicsNetwork(nn.Module):
     needed to adjust model predictions to match real vehicle behavior.
     """
     
-    def __init__(self, state_dim=7, control_dim=3, hidden_dims=[128, 128, 64], 
-                 dropout_rate=0.2, output_dim=7):
+    def __init__(self, state_dim=7, control_dim=3, hidden_dims=[128, 256, 128], 
+                 dropout_rate=0.4, output_dim=7):
         """
         Initialize residual dynamics network.
         
@@ -174,7 +174,7 @@ class ResidualDynamicsLearner:
     """
     
     def __init__(self, state_dim=7, control_dim=3, learning_rate=1e-3, 
-                 l2_reg=1e-5, device='cpu'):
+                 l2_reg=1e-4, device='cpu'):
         """
         Initialize learner.
         
@@ -189,7 +189,7 @@ class ResidualDynamicsLearner:
         self.state_dim = state_dim
         self.control_dim = control_dim
         self.output_dim = state_dim
-        
+
         # Build network
         self.network = ResidualDynamicsNetwork(state_dim, control_dim, 
                                                output_dim=self.output_dim).to(device)
@@ -199,7 +199,13 @@ class ResidualDynamicsLearner:
                                    lr=learning_rate, 
                                    weight_decay=l2_reg)
         self.loss_fn = nn.MSELoss()
-        
+        self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            self.optimizer,
+            mode='min',
+            factor=0.5,        # halve LR when plateau
+            patience=10,       # wait 10 epochs before reducing
+            min_lr=1e-6
+        )
         # State normalizers for input and output
         self.state_normalizer = StateNormalizer(state_dim)
         self.control_normalizer = StateNormalizer(control_dim)
@@ -356,6 +362,10 @@ class ResidualDynamicsLearner:
             
             # Early stopping
             if val_loss is not None:
+                self.scheduler.step(val_loss)
+                current_lr = self.optimizer.param_groups[0]['lr']
+                if verbose and epoch % 10 == 0:
+                    msg += f', lr={current_lr:.2e}'
                 if val_loss < best_val_loss:
                     best_val_loss = val_loss
                     patience_counter = 0

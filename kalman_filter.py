@@ -30,10 +30,10 @@ class ExtendedKalmanFilter:
         self.params = params
         self.n_states = 13
         self.n_measurements = 9
-        
+        self.vx_prev = 30.0
+        self.vy_prev = 0.0
         # Initial state estimate
-        self.x = np.zeros(self.n_states)
-        self.x[3] = 5.0  # initial vx = 5 m/s
+        self.x = np.array([0., 0., 0., 30., 0., 0., 30., 30., 30., 30., 8000., 4., 0.5])
         
         # State covariance (estimate uncertainty)
         self.P = np.eye(self.n_states) * 1.0
@@ -82,7 +82,7 @@ class ExtendedKalmanFilter:
         
         # Safety clamps
         self.x[0:2] = np.clip(self.x[0:2], -1e4, 1e4)
-        self.x[2] = np.remainder(self.x[2], 2*np.pi)
+        self.x[2] = np.arctan2(np.sin(self.x[2]), np.cos(self.x[2]))
         self.x[3:6] = np.clip(self.x[3:6], -50, 50)
         self.x[6:10] = np.clip(self.x[6:10], 0, 100)
         self.x[10] = np.clip(self.x[10], 1000, 15500)
@@ -97,7 +97,8 @@ class ExtendedKalmanFilter:
         
         # Ensure P remains symmetric and positive definite
         self.P = 0.5 * (self.P + self.P.T)
-    
+        self.vx_prev = self.x[3]
+        self.vy_prev = self.x[4]
     def update(self, z):
         """
         Update step: incorporate measurement into state estimate.
@@ -135,7 +136,9 @@ class ExtendedKalmanFilter:
         
         # Ensure P remains symmetric and positive definite
         self.P = 0.5 * (self.P + self.P.T)
-        
+        self.x[11] = int(np.clip(round(self.x[11]), 1, 8))   # gear: discrete, clamp
+        self.x[12] = np.clip(self.x[12], 0, 1)               # throttle: physical bounds
+        self.x[2]  = np.remainder(self.x[2], 2*np.pi)        # psi: wrap angle
         # Clamp state values after update
         self.x[0:2] = np.clip(self.x[0:2], -1e4, 1e4)
         self.x[2] = np.remainder(self.x[2], 2*np.pi)
@@ -143,7 +146,10 @@ class ExtendedKalmanFilter:
         self.x[6:10] = np.clip(self.x[6:10], 0, 100)
         self.x[10] = np.clip(self.x[10], 1000, 15500)
         self.x[12] = np.clip(self.x[12], 0, 1)
-    
+        self.P[11, :] = 0.0
+        self.P[:, 11] = 0.0
+        self.x[2] = np.arctan2(np.sin(self.x[2]), np.cos(self.x[2]))
+
     def _jacobian_dynamics(self, x, u, dt, eps=1e-5):
         """
         Compute Jacobian matrix of dynamics with respect to state.
@@ -177,40 +183,12 @@ class ExtendedKalmanFilter:
             except:
                 # If computation fails, use identity (no coupling)
                 F[i, i] = 1.0
-        
+        F = np.clip(F, -100, 100)
         return F
     
     def _measurement_function(self, x):
-        """
-        Measurement model: what we observe from the state.
-        
-        Args:
-            x: state vector
-            
-        Returns:
-            z_pred: predicted measurement
-        """
-        # From state, extract measurements
-        # State: [x, y, psi, vx, vy, r, vw_fl, vw_fr, vw_rl, vw_rr, rpm, gear, throttle]
-        
-        # Compute accelerations from velocities (simple approximation)
-        # In real EKF, these would come from IMU
-        ax = 0.0  # would need previous velocity
-        ay = 0.0
-        
-        z_pred = np.array([
-            x[0],                             # x position (GPS) (0)
-            x[1],                             # y position (GPS) (1)
-            ax,                               # ax (2)
-            ay,                               # ay (3)
-            x[5],                             # r (yaw rate) (4)
-            x[3],                             # vx (5)
-            x[4],                             # vy (6)
-            x[10],                            # engine_rpm (7)
-            (x[6] + x[7] + x[8] + x[9]) / 4  # average wheel speed (8)
-        ])
-        
-        return z_pred
+        from sensors import measurement_function_fixed
+        return measurement_function_fixed(x, self.vx_prev, self.vy_prev, self.dt)
     
     def _jacobian_measurement(self, x):
         """
@@ -264,8 +242,10 @@ class ExtendedKalmanFilter:
         if initial_state is not None:
             self.x = initial_state.copy()
         else:
-            self.x = np.zeros(self.n_states)
-            self.x[3] = 5.0
+            self.x = np.array([0., 0., 0., 30., 0., 0., 30., 30., 30., 30., 8000., 4., 0.5])
+        self.P = np.eye(self.n_states) * 1.0
+        self.vx_prev = 30.0
+        self.vy_prev = 0.0
         
         self.P = np.eye(self.n_states) * 1.0
 

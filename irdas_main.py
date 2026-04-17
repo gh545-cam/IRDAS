@@ -12,8 +12,71 @@ from kalman_filter import ExtendedKalmanFilter, add_sensor_noise
 from residual_network import ResidualDynamicsLearner
 from parameter_adapter import OnlineParameterAdapter
 from twin_track import twin_track_model
+from sensors import SensorSimulator
+def ornstein_uhlenbeck(prev, mu=0.0, theta=0.15, sigma=0.1, dt=0.05):
+    """
+    Temporally correlated random process.
+    Generates smooth, realistic control sequences.
 
+    Args:
+        prev:  previous value
+        mu:    mean (equilibrium point)
+        theta: mean reversion rate (higher = snappier return to mu)
+        sigma: noise amplitude
+        dt:    timestep
 
+    Returns:
+        next value
+    """
+    noise = sigma * np.sqrt(dt) * np.random.randn()
+    return prev + theta * (mu - prev) * dt + noise
+def generate_ou_controls(n_samples, dt=0.05):
+    """
+    Generate realistic control sequences using Ornstein-Uhlenbeck process.
+
+    Produces smooth, correlated inputs that look like real driving —
+    gradual steering corrections, sustained throttle, occasional braking.
+    Much better training data than pure random controls.
+
+    Args:
+        n_samples: number of timesteps
+        dt:        timestep
+
+    Returns:
+        controls array (n_samples, 3): [steering, throttle, brake]
+    """
+    controls = []
+
+    # Initial values
+    steer    = 0.0
+    throttle = 0.6
+    brake    = 0.0
+
+    for _ in range(n_samples):
+        # Steering: slow oscillation around zero
+        steer = ornstein_uhlenbeck(steer, mu=0.0, theta=0.3, sigma=0.15, dt=dt)
+        steer = np.clip(steer, -0.25, 0.25)
+
+        # Throttle/brake: mutually exclusive
+        if brake > 0.05:
+            # Currently braking — tend to release
+            throttle = 0.0
+            brake = ornstein_uhlenbeck(brake, mu=0.0, theta=0.5, sigma=0.1, dt=dt)
+            brake = np.clip(brake, 0.0, 0.3)
+        else:
+            # Currently on throttle
+            throttle = ornstein_uhlenbeck(throttle, mu=0.6, theta=0.2, sigma=0.15, dt=dt)
+            throttle = np.clip(throttle, 0.2, 1.0)
+            brake = 0.0
+
+            # Small chance of starting to brake
+            if np.random.rand() < 0.02:
+                throttle = 0.0
+                brake    = 0.1
+
+        controls.append([steer, throttle, brake])
+
+    return np.array(controls)
 class IRDAS:
     """
     In-race Data Augmentation System - integrates all components:
@@ -34,10 +97,11 @@ class IRDAS:
             use_rls: whether to use recursive least squares for parameter adaptation
         """
         self.baseline_params = baseline_params.copy()
+        self.true_state = np.array([0., 0., 0., 30., 0., 0., 30., 30., 30., 30., 8000., 4., 0.5])
+        self.nn_trained = False 
         self.device = device
         self.use_nn = use_nn
         self.use_rls = use_rls
-        
         # Components
         self.real_simulator = None  # initialized with true params
         self.kalman_filter = ExtendedKalmanFilter(baseline_params)
@@ -66,7 +130,8 @@ class IRDAS:
         
         self.time_step = 0.0
         self.dt = 0.05
-    
+        self.sensor_sim = SensorSimulator(dt=self.dt)
+
     def initialize_real_vehicle(self, true_params=None, seed=None):
         """
         Initialize the real vehicle simulator with possibly mismatched parameters.
@@ -79,8 +144,10 @@ class IRDAS:
         print(f"Real vehicle initialized with parameter differences:")
         for name, diff in self.real_simulator.get_parameter_difference().items():
             print(f"  {name}: {diff:+.4f}")
-    
-    def pretrain_neural_network(self, n_training_samples=1000, epochs=100, batch_size=32):
+
+
+
+    def pretrain_neural_network(self, n_training_samples=5000, epochs=100, batch_size=32):
         """
         Pretrain neural network on generated data from simulator.
         Uses reduced 7-state space for dynamics-relevant learning.
@@ -108,16 +175,15 @@ class IRDAS:
         states_real = []
         controls_list = []
         
-        state_baseline = np.array([0., 0., 0., 5., 0., 0., 5., 5., 5., 5., 3000., 1., 0.1])
+        state_baseline = np.array([0., 0., 0., 30., 0., 0., 30., 30., 30., 30., 8000., 4., 0.5])
         state_real = state_baseline.copy()
-        
+        self.real_simulator.reset_history()   # clear pretraining steps from history
+        self.real_simulator.reset_history()
+        print(f"History length after reset: {len(self.real_simulator.state_history)}")
+        ou_controls = generate_ou_controls(n_training_samples)
         for i in range(n_training_samples):
             # Random control
-            u = np.array([
-                np.random.uniform(-0.2, 0.2),
-                np.random.uniform(0.0, 1.0),
-                np.random.uniform(0.0, 0.3)
-            ])
+            u = ou_controls[i]
             
             try:
                 # Baseline model
@@ -273,6 +339,12 @@ class IRDAS:
         Returns:
             estimated_state: Kalman filter estimated full 13-state
         """
+        step_num = len(self.history['true_states'])
+        if step_num < 3:
+            print(f"\n--- Step {step_num} RAW ---")
+            print(f"Control input:     {control}")
+            print(f"State going IN:    vx={self.kalman_filter.x[3]:.3f}, gear={self.kalman_filter.x[11]:.0f}, rpm={self.kalman_filter.x[10]:.0f}")
+            print(f"True state going IN: {self.real_simulator.get_state_history()[-1][3] if self.real_simulator.state_history else 'EMPTY'}")
         # Default measurement noise
         if measurement_noise_std is None:
             measurement_noise_std = {
@@ -282,13 +354,12 @@ class IRDAS:
             }
         
         # Step 1: Get true state from real vehicle simulator
-        true_state = self.real_simulator.get_state_history()[-1] if hasattr(self.real_simulator, 'state_history') and self.real_simulator.state_history else \
-                     np.array([0., 0., 0., 5., 0., 0., 5., 5., 5., 5., 3000., 1., 0.1])
         
-        true_state_next = self.real_simulator.step(true_state, control, self.dt)
-        
+                
+        true_state_next = self.real_simulator.step(self.true_state, control, self.dt)
+        self.true_state = true_state_next.copy()
         # Step 2: Generate noisy measurement from true state
-        measurement = add_sensor_noise(true_state_next, measurement_noise_std)
+        measurement = self.sensor_sim.measure(true_state_next)
         
         # Step 3: Kalman filter prediction (baseline model)
         self.kalman_filter.predict(control, self.dt)
@@ -310,17 +381,20 @@ class IRDAS:
         estimated_state = self.kalman_filter.get_state()
         
         # Step 6: Compute residual for parameter adaptation
-        baseline_next = twin_track_model(true_state, control, self.dt, self.baseline_params)
+        baseline_next = twin_track_model(self.true_state, control, self.dt, self.baseline_params)
         model_error = true_state_next - baseline_next
         residual = np.linalg.norm(model_error)
         
         # Step 7: Parameter adaptation (optional)
         if use_param_adaptation and self.use_rls:
-            # Use simplified adaptation signal
-            obs = np.concatenate([true_state[:7], control])
-            meas = model_error[:7]
-            self.param_adapter.update_rls(obs, meas, adaptive_factor=0.98)
-            self.current_params = self.param_adapter.get_current_params()
+                # Only adapt if model error is meaningful but not exploding
+            model_error_norm = np.linalg.norm(model_error[:7])
+            if 0.001 < model_error_norm < 10.0:
+                # Use normalised error signal, not raw state values
+                obs  = model_error[:7] / (model_error_norm + 1e-6)
+                meas = model_error[:7] / (model_error_norm + 1e-6)
+                self.param_adapter.update_rls(obs, meas, adaptive_factor=0.995)
+                self.current_params = self.param_adapter.get_current_params()
         
         # Step 8: Log history
         self.history['true_states'].append(true_state_next.copy())
@@ -337,8 +411,33 @@ class IRDAS:
         
         self.time_step += self.dt
         self.time_step_count = len(self.history['true_states'])
-        
+        step = len(self.history['true_states'])
+        if step < 5:
+            print(f"\n--- Step {step} ---")
+            print(f"True state vx:        {true_state_next[3]:.3f}")
+            print(f"Measurement vx:       {measurement[5]:.3f}")
+            print(f"EKF estimate vx:      {estimated_state[3]:.3f}")
+            print(f"Innovation (z-h(x)):  {measurement - self.kalman_filter._measurement_function(self.kalman_filter.x)}")
+            print(f"P diagonal:           {np.diag(self.kalman_filter.P)}")
         return estimated_state
+    
+    def _generate_control(self, t=0):
+        """Generate physically realistic controls — no simultaneous throttle/brake."""
+        vx = self.true_state[3]
+
+        # Speed-dependent steering limit — less steering at high speed
+        max_steer = np.clip(0.3 - 0.005 * vx, 0.05, 0.3)
+        steering = np.random.uniform(-max_steer, max_steer)
+
+        # Throttle/brake are mutually exclusive
+        if np.random.rand() < 0.8:   # 80% chance throttle
+            throttle = np.random.uniform(0.3, 0.9)
+            brake    = 0.0
+        else:                         # 20% chance braking
+            throttle = 0.0
+            brake    = np.random.uniform(0.05, 0.3)
+
+        return np.array([steering, throttle, brake])   
     
     def simulate(self, n_steps=1000, control_strategy='random', show_progress=True):
         """
@@ -356,11 +455,7 @@ class IRDAS:
         for step in range(n_steps):
             # Generate control input
             if control_strategy == 'random':
-                u = np.array([
-                    np.random.uniform(-0.2, 0.2),
-                    np.random.uniform(0.0, 1.0),
-                    np.random.uniform(0.0, 0.3)
-                ])
+                u = self._generate_control()
             elif control_strategy == 'aggressive_maneuver':
                 # Sinusoidal steering with throttle
                 t = step * self.dt
@@ -386,7 +481,20 @@ class IRDAS:
                       f"Model error: {self.history['model_errors'][-1]:.4f}")
         
         print(f"\nSimulation complete! Ran {len(self.history['true_states'])} steps")
-    
+    def reset(self, initial_state=None):
+        """Reset IRDAS between scenarios."""
+        if initial_state is None:
+            initial_state = np.array([0., 0., 0., 30., 0., 0., 
+                                    30., 30., 30., 30., 8000., 4., 0.5])
+        self.true_state = initial_state.copy()
+        self.kalman_filter.reset(initial_state)
+        self.sensor_sim.reset()
+        self.real_simulator.reset_history()
+        self.history = {k: [] for k in self.history}  # clear history
+        self.time_step = 0.0
+        self.nn_trained = True if (self.use_nn and hasattr(self, 'nn_learner')) else False  # ADD THIS
+
+
     def get_metrics(self):
         """Compute and return performance metrics."""
         if len(self.history['true_states']) == 0:
@@ -417,7 +525,18 @@ class IRDAS:
                 name: change_info['change_pct'] 
                 for name, change_info in last_param_changes.items()
             }
-        
+        true_arr = np.array(self.history['true_states'])
+        est_arr  = np.array(self.history['estimated_states'])
+
+        state_names = ['x','y','psi','vx','vy','r',
+                    'vw_fl','vw_fr','vw_rl','vw_rr','rpm','gear','throttle']
+
+        print("\nPer-state RMS error (true vs estimated):")
+        for i, name in enumerate(state_names):
+            rms = np.sqrt(np.mean((true_arr[:,i] - est_arr[:,i])**2))
+            print(f"  {name:<10}: {rms:.4f}")
+
+
         return metrics
     
     def verify_state_reconstruction(self):

@@ -111,22 +111,24 @@ class RealVehicleSimulator:
         """
         # Initialize state
         state = np.array([
-            0., 0., 0.,                    # x, y, psi
-            5., 0., 0.,                    # vx, vy, r
-            5., 5., 5., 5.,               # wheel speeds
-            3000., 1., 0.1                # engine_rpm, gear, throttle
-        ], dtype=np.float64)
+            0., 0., 0.,           # x, y, psi
+            30., 0., 0.,          # vx=30 m/s (highway speed), vy=0, r=0
+            30., 30., 30., 30.,   # wheel speeds match vx
+            8000., 4., 0.5        # rpm, gear 4, half throttle
+        ])
         
         states = [state.copy()]
         controls = []
         
         for step in range(n_steps):
             # Generate random controls
+            throttle = np.random.uniform(0.3, 0.8)
+            brake    = 0.0 if throttle > 0.5 else np.random.uniform(0.0, 0.2)
             u = np.array([
-                np.random.uniform(-0.2, 0.2),
-                np.random.uniform(0.0, 1.0),
-                np.random.uniform(0.0, 0.3)
-            ], dtype=np.float64)
+                np.random.uniform(-0.15, 0.15),   # gentle steering
+                throttle,
+                brake
+            ])
             
             controls.append(u)
             
