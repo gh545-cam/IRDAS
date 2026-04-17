@@ -178,13 +178,26 @@ def run_race_scenario(irdas: IRDAS, n_laps: int = N_LAPS,
 
     # Generate OU controls for full stint upfront
     total_steps  = n_laps * steps_per_lap
-    ou_controls  = generate_ou_controls(total_steps, DT)
+    rng = np.random.default_rng(42)
+    ou_controls  = np.zeros((total_steps, 3))
+    steer, throttle = 0.0, 0.85
+    for i in range(total_steps):
+        # Sinusoidal steering simulates corners — 3 corners per lap
+        lap_phase    = (i % steps_per_lap) / steps_per_lap
+        corner_steer = 0.12 * np.sin(2 * np.pi * lap_phase * 3)
+        steer        = np.clip(corner_steer + rng.normal(0, 0.01), -0.20, 0.20)
+        throttle     = np.clip(throttle + rng.normal(0, 0.02), 0.75, 1.0)
+        ou_controls[i] = [steer, throttle, 0.0]
 
     step_counter = 0
 
     for lap in range(n_laps):
         lap_residuals = []
         lap_vx        = []
+
+        # Reset vehicle speed at lap start — simulates completing a lap circuit
+        reset_state = INITIAL_STATE.copy()
+        irdas.true_state = reset_state.copy()
 
         # Update "real" vehicle tyre params for this lap
         degraded_params = degrade_tyre_params(irdas.baseline_params, lap, n_laps)

@@ -355,8 +355,7 @@ class IRDAS:
         
         # Step 1: Get true state from real vehicle simulator
         
-                
-        true_state_before = self.true_state.copy()          # save BEFORE stepping
+        true_state_before = self.true_state.copy()          # snapshot BEFORE step
         true_state_next = self.real_simulator.step(self.true_state, control, self.dt)
         self.true_state = true_state_next.copy()
 
@@ -390,14 +389,14 @@ class IRDAS:
         # Step 7: Parameter adaptation (optional)
         if use_param_adaptation and self.use_rls:
             model_error_norm = np.linalg.norm(model_error[:7])
-            if 0.001 < model_error_norm < 10.0:
+            if 1e-6 < model_error_norm < 10.0:
 
                 # --- extract what we need from true_state (already defined above) ---
-                vx  = self.true_state[3]
-                vy  = self.true_state[4]
-                r   = self.true_state[5]
-                vw_rl = self.true_state[8]
-                vw_rr = self.true_state[9]
+                vx    = true_state_before[3]
+                vy    = true_state_before[4]
+                r     = true_state_before[5]
+                vw_rl = true_state_before[8]
+                vw_rr = true_state_before[9]
 
                 # --- slip angles (mirrors twin_track.py logic) ---
                 L   = self.baseline_params.get('L',  3.6)
@@ -435,11 +434,9 @@ class IRDAS:
                 Fz_kN_wheels = np.array([Fz_front, Fz_front, Fz_rear, Fz_rear])
 
                 # --- force residuals: vy error -> lateral, vx error -> longitudinal ---
-                lat_force_error = model_error[4] * M_veh
+                lat_force_error = (model_error[4] + model_error[5] * 10.0) * M_veh
                 lon_force_error = model_error[3] * M_veh
-                if len(self.history['true_states']) % 400 == 0:  # print once per lap
-                    print(f"  [RLS DEBUG] lat_err={lat_force_error:.2f}N  lon_err={lon_force_error:.2f}N  "
-                        f"slip_angles={slip_angles}  model_error[:5]={model_error[:5]}")
+
                 self.param_adapter.update_rls(
                     slip_angles, slip_ratios, Fz_kN_wheels,
                     lat_force_error, lon_force_error,
@@ -466,14 +463,7 @@ class IRDAS:
         
         self.time_step += self.dt
         self.time_step_count = len(self.history['true_states'])
-        step = len(self.history['true_states'])
-        if step < 5:
-            print(f"\n--- Step {step} ---")
-            print(f"True state vx:        {true_state_next[3]:.3f}")
-            print(f"Measurement vx:       {measurement[5]:.3f}")
-            print(f"EKF estimate vx:      {estimated_state[3]:.3f}")
-            print(f"Innovation (z-h(x)):  {measurement - self.kalman_filter._measurement_function(self.kalman_filter.x)}")
-            print(f"P diagonal:           {np.diag(self.kalman_filter.P)}")
+
         return estimated_state
     
     def _generate_control(self, t=0):
@@ -699,6 +689,7 @@ if __name__ == "__main__":
     
     # Initialize real vehicle with mismatch
     irdas.initialize_real_vehicle(seed=42)
+
     print("Real vehicle simulator initialized with parameter mismatch")
     
     # Quick test: just a few steps

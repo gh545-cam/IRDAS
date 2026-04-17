@@ -24,13 +24,13 @@ class OnlineParameterAdapter:
         ]
 
         self.param_bounds = {
-            'TYRE_LAT_B':  (8.0,  16.0),
-            'TYRE_LAT_a2': (1.5,  2.5),
-            'TYRE_LON_B':  (8.0,  16.0),
-            'TYRE_LON_a2': (1.5,  2.5),
-            'M':  (baseline_params['M']  * 0.85, baseline_params['M']  * 1.15),
-            'Cd': (baseline_params['Cd'] * 0.85, baseline_params['Cd'] * 1.15),
-            'Cl': (baseline_params['Cl'] * 0.85, baseline_params['Cl'] * 1.15),
+            'TYRE_LAT_B':  (6.0,  20.0),
+            'TYRE_LAT_a2': (1.0,  3.0),
+            'TYRE_LON_B':  (6.0,  20.0),
+            'TYRE_LON_a2': (1.0,  3.0),
+            'M':  (baseline_params['M']  * 0.75, baseline_params['M']  * 1.25),
+            'Cd': (baseline_params['Cd'] * 0.75, baseline_params['Cd'] * 1.25),
+            'Cl': (baseline_params['Cl'] * 0.75, baseline_params['Cl'] * 1.25),
         }
 
         # Start with diagonal covariance — decoupled per-parameter updates
