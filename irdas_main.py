@@ -435,9 +435,39 @@ class IRDAS:
                 Fz_kN_wheels = np.array([Fz_front, Fz_front, Fz_rear, Fz_rear])
 
                 # --- force residuals: vy error -> lateral, vx error -> longitudinal ---
-                lat_force_error = (model_error[4] + model_error[5] * 10.0) * M_veh
-                lon_force_error = model_error[3] * M_veh
-                
+                # Compute force errors directly from Pacejka at current slip angles
+                # This is much cleaner than trying to back out forces from state errors
+                from twin_track import pacejka_magic_formula
+
+                # Lateral force difference: real params vs baseline params
+                lat_force_real     = sum(
+                    pacejka_magic_formula(a, Fz_kN_wheels[i],
+                                         self.real_simulator.true_params['TYRE_LAT'],
+                                         'lateral')
+                    for i, a in enumerate(slip_angles)
+                )
+                lat_force_baseline = sum(
+                    pacejka_magic_formula(a, Fz_kN_wheels[i],
+                                         self.baseline_params['TYRE_LAT'],
+                                         'lateral')
+                    for i, a in enumerate(slip_angles)
+                )
+                lat_force_error = lat_force_real - lat_force_baseline
+
+                # Longitudinal force difference: rear wheels only
+                lon_force_real     = sum(
+                    pacejka_magic_formula(slip_ratios[i] * 100, Fz_kN_wheels[2 + i],
+                                         self.real_simulator.true_params['TYRE_LON'],
+                                         'longitudinal')
+                    for i in range(2)
+                )
+                lon_force_baseline = sum(
+                    pacejka_magic_formula(slip_ratios[i] * 100, Fz_kN_wheels[2 + i],
+                                         self.baseline_params['TYRE_LON'],
+                                         'longitudinal')
+                    for i in range(2)
+                )
+                lon_force_error = lon_force_real - lon_force_baseline
                 # --- Additional signals for M, Cd, Cl adaptation ---
                 # M (mass): estimated from longitudinal force error scaled by speed
                 # Higher vx -> same force error means bigger M error

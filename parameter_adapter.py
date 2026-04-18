@@ -19,15 +19,13 @@ class OnlineParameterAdapter:
         self.memory_horizon  = memory_horizon
 
         self.adaptive_param_names = [
-            'TYRE_LAT_B', 'TYRE_LAT_a2', 'TYRE_LON_B', 'TYRE_LON_a2',
+            'TYRE_LAT_a2', 'TYRE_LON_a2',
             'M', 'Cd', 'Cl'
         ]
 
         self.param_bounds = {
-            'TYRE_LAT_B':  (5.0,  21.0),
-            'TYRE_LAT_a2': (0.5,  5.0),
-            'TYRE_LON_B':  (5.0,  21.0),
-            'TYRE_LON_a2': (1.5,  2.5),
+            'TYRE_LAT_a2': (1.0,  3.0),
+            'TYRE_LON_a2': (1.0,  3.0),
             'M':  (baseline_params['M']  * 0.85, baseline_params['M']  * 1.15),
             'Cd': (baseline_params['Cd'] * 0.85, baseline_params['Cd'] * 1.15),
             'Cl': (baseline_params['Cl'] * 0.85, baseline_params['Cl'] * 1.15),
@@ -47,9 +45,7 @@ class OnlineParameterAdapter:
 
     def _params_to_vector(self):
         return np.array([
-            self.current_params['TYRE_LAT']['B'],
             self.current_params['TYRE_LAT']['a2'],
-            self.current_params['TYRE_LON']['B'],
             self.current_params['TYRE_LON']['a2'],
             self.current_params['M'],
             self.current_params['Cd'],
@@ -60,20 +56,16 @@ class OnlineParameterAdapter:
         params = self.current_params.copy()
         params['TYRE_LAT'] = params['TYRE_LAT'].copy()
         params['TYRE_LON'] = params['TYRE_LON'].copy()
-        params['TYRE_LAT']['B']  = vector[0]
-        params['TYRE_LAT']['a2'] = vector[1]
-        params['TYRE_LON']['B']  = vector[2]
-        params['TYRE_LON']['a2'] = vector[3]
-        params['M']  = vector[4]
-        params['Cd'] = vector[5]
-        params['Cl'] = vector[6]
+        params['TYRE_LAT']['a2'] = vector[0]
+        params['TYRE_LON']['a2'] = vector[1]
+        params['M']  = vector[2]
+        params['Cd'] = vector[3]
+        params['Cl'] = vector[4]
         return params
 
     def _extract_vector(self, params):
         return np.array([
-            params['TYRE_LAT']['B'],
             params['TYRE_LAT']['a2'],
-            params['TYRE_LON']['B'],
             params['TYRE_LON']['a2'],
             params['M'],
             params['Cd'],
@@ -141,14 +133,15 @@ class OnlineParameterAdapter:
 
         # phi order matches adaptive_param_names:
         # [TYRE_LAT_B, TYRE_LAT_a2, TYRE_LON_B, TYRE_LON_a2, M, Cd, Cl]
+        vx   = self._last_vx if hasattr(self, '_last_vx') else 25.0
+        Area = self.baseline_params.get('Area', 1.2)
+        aero_sens = 0.5 * Area * vx ** 2
         phi = np.array([
-            dF_dB_lat,
-            dF_da2_lat,
-            dF_dB_lon,
-            dF_da2_lon,
-            0.0,   # mass not estimated from tyre forces
-            0.0,   # Cd  not estimated from tyre forces
-            0.0,   # Cl  not estimated from tyre forces
+            dF_da2_lat,          # TYRE_LAT_a2
+            dF_da2_lon,          # TYRE_LON_a2
+            0.0,                 # M
+            aero_sens,           # Cd
+            aero_sens,           # Cl
         ])
 
         return phi
@@ -185,14 +178,13 @@ class OnlineParameterAdapter:
         
         # Build measurement vector = force errors (in Newtons, not divided)
         # Keep signals in their natural units for better RLS performance
+        lat_scaled = lateral_force_error * 3.0
         y = np.array([
-            lateral_force_error,                # [0] lat force error (N)
-            lateral_force_error,                # [1] lat force error (N)
-            longitudinal_force_error,           # [2] lon force error (N)
-            longitudinal_force_error,           # [3] lon force error (N)
-            acceleration_error,                 # [4] acceleration error (m/s^2)
-            speed_error,                        # [5] speed error (m/s)
-            speed_error * 0.5,                  # [6] speed error (m/s)
+            lateral_force_error,       # TYRE_LAT_a2
+            longitudinal_force_error,  # TYRE_LON_a2
+            acceleration_error,        # M
+            -longitudinal_force_error, # Cd
+            lateral_force_error * 0.1, # Cl
         ])
         
         if debug:
@@ -240,19 +232,16 @@ class OnlineParameterAdapter:
             p_new = (1.0 / adaptive_factor) * (1.0 - k_i * phi_i) * p_i
             # Very conservative refresh to minimize oscillations
             # Only allow gradual re-exploration after convergence
-            if i < 4:
-                refresh = 0.005  # Very conservative for tire parameters
-            else:
-                refresh = 0.01  # Conservative for M, Cd, Cl
-            self.P[i, i] = np.clip(p_new + refresh, 0.05, 20.0)
+            # Tighter ceiling for tyre params to prevent gain explosion
+            p_ceil = 0.5 if i < 2 else 1.0
+            self.P[i, i] = np.clip(p_new, 1e-6, p_ceil)
         
         # Apply bounds to parameter DEVIATIONS to prevent runaway
         # The param_vector now represents dtheta (parameter deviations)
         # We want to keep dtheta reasonable: ±20% of baseline
+        baseline_vec = self._extract_vector(self.baseline_params)
         for i in range(len(self.adaptive_param_names)):
-            name = self.adaptive_param_names[i]
-            baseline_val = self._extract_vector(self.baseline_params)[i]
-            max_dev = baseline_val * 0.2  # Allow ±20% deviation
+            max_dev = baseline_vec[i] * 0.25   # ±25% for all params
             self.param_vector[i] = np.clip(self.param_vector[i], -max_dev, max_dev)
         
         # Reconstruct actual parameters: theta_est = theta_baseline + dtheta_est
@@ -330,12 +319,34 @@ class OnlineParameterAdapter:
     # ------------------------------------------------------------------
 
     def get_current_params(self):
-        return self.current_params.copy()
+        params = self.current_params.copy()
+        params['TYRE_LAT'] = params['TYRE_LAT'].copy()
+        params['TYRE_LON'] = params['TYRE_LON'].copy()
+
+        # Derive B from a2 using physical degradation relationship:
+        # As a2 drops (grip loss), B increases (tyre hardens)
+        # B_new = B_baseline * (a2_baseline / a2_current) ^ alpha
+        alpha = 0.3
+        baseline_a2_lat = self.baseline_params['TYRE_LAT']['a2']
+        baseline_B_lat  = self.baseline_params['TYRE_LAT']['B']
+        current_a2_lat  = params['TYRE_LAT']['a2']
+        if current_a2_lat > 0:
+            params['TYRE_LAT']['B'] = baseline_B_lat * (baseline_a2_lat / current_a2_lat) ** alpha
+
+        baseline_a2_lon = self.baseline_params['TYRE_LON']['a2']
+        baseline_B_lon  = self.baseline_params['TYRE_LON']['B']
+        current_a2_lon  = params['TYRE_LON']['a2']
+        if current_a2_lon > 0:
+            params['TYRE_LON']['B'] = baseline_B_lon * (baseline_a2_lon / current_a2_lon) ** alpha
+
+        return params
 
     def get_parameter_changes(self):
         changes  = {}
         base_vec = self._extract_vector(self.baseline_params)
-        curr_vec = self.param_vector
+        # param_vector stores deviations — reconstruct absolute values
+        curr_vec = base_vec + self.param_vector
+        curr_vec = self._apply_bounds(curr_vec.copy())
         for i, name in enumerate(self.adaptive_param_names):
             change_pct = ((curr_vec[i] - base_vec[i]) / base_vec[i]) * 100
             changes[name] = {
