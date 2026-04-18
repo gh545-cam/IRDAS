@@ -388,8 +388,9 @@ class IRDAS:
         
         # Step 7: Parameter adaptation (optional)
         if use_param_adaptation and self.use_rls:
+            # Only skip if error is exactly zero (no update signal)
             model_error_norm = np.linalg.norm(model_error[:7])
-            if 1e-6 < model_error_norm < 10.0:
+            if model_error_norm > 1e-12:  # Much more lenient guard
 
                 # --- extract what we need from true_state (already defined above) ---
                 vx    = true_state_before[3]
@@ -436,11 +437,28 @@ class IRDAS:
                 # --- force residuals: vy error -> lateral, vx error -> longitudinal ---
                 lat_force_error = (model_error[4] + model_error[5] * 10.0) * M_veh
                 lon_force_error = model_error[3] * M_veh
+                
+                # --- Additional signals for M, Cd, Cl adaptation ---
+                # M (mass): estimated from longitudinal force error scaled by speed
+                # Higher vx -> same force error means bigger M error
+                acceleration_error = lon_force_error / max(abs(vx), 1.0) if abs(vx) > 0.5 else 0.0
+                
+                # Cd (drag): estimated from sustained speed error
+                # Use raw vx error as signal for drag coefficient
+                speed_error = model_error[3]  # vx error -> drag/downforce effect
+                
+                # Improve drag signal with throttle state
+                # If throttle is low and we're going slower than expected, could be high Cd
+                throttle = float(control[1])
+                if throttle < 0.5:
+                    speed_error *= 1.5  # Amplify speed error signal during coasting
 
                 self.param_adapter.update_rls(
                     slip_angles, slip_ratios, Fz_kN_wheels,
                     lat_force_error, lon_force_error,
-                    adaptive_factor=0.995
+                    acceleration_error=acceleration_error,
+                    speed_error=speed_error,
+                    adaptive_factor=0.95
                 )
                 self.current_params = self.param_adapter.get_current_params()
 
@@ -535,8 +553,10 @@ class IRDAS:
         self.kalman_filter.reset(initial_state)
         self.sensor_sim.reset()
         self.real_simulator.reset_history()
+        self.param_adapter.reset_to_baseline()  # CRITICAL: reset parameter adapter
         self.history = {k: [] for k in self.history}  # clear history
         self.time_step = 0.0
+        self.nn_trained = True if (self.use_nn and hasattr(self, 'nn_learner')) else False
         self.nn_trained = True if (self.use_nn and hasattr(self, 'nn_learner')) else False  # ADD THIS
 
 

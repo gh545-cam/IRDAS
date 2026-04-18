@@ -628,3 +628,32 @@ def generate_trajectory(n_steps: int = 10000, dt: float = 0.05) -> tuple[np.ndar
         controls.append(u)
  
     return np.array(states), np.array(controls)
+
+def tire_lateral_force(slip_angle_deg, Fz_kN, params):
+    """
+    Wrapper function to compute tire lateral force using Pacejka magic formula.
+    
+    Args:
+        slip_angle_deg: slip angle in degrees
+        Fz_kN: normal force in kN
+        params: tire parameter dictionary (TYRE_LAT)
+    
+    Returns:
+        Tire lateral force in Newtons
+    """
+    return pacejka_magic_formula(slip_angle_deg, Fz_kN, params, slip_type='lateral')
+
+
+def tire_longitudinal_force(slip_ratio, Fz_kN, params):
+    """
+    Wrapper function to compute tire longitudinal force using Pacejka magic formula.
+    
+    Args:
+        slip_ratio: slip ratio (dimensionless)
+        Fz_kN: normal force in kN
+        params: tire parameter dictionary (TYRE_LON)
+    
+    Returns:
+        Tire longitudinal force in Newtons
+    """
+    return pacejka_magic_formula(slip_ratio, Fz_kN, params, slip_type='longitudinal')

@@ -24,18 +24,18 @@ class OnlineParameterAdapter:
         ]
 
         self.param_bounds = {
-            'TYRE_LAT_B':  (6.0,  20.0),
-            'TYRE_LAT_a2': (1.0,  3.0),
-            'TYRE_LON_B':  (6.0,  20.0),
-            'TYRE_LON_a2': (1.0,  3.0),
-            'M':  (baseline_params['M']  * 0.75, baseline_params['M']  * 1.25),
-            'Cd': (baseline_params['Cd'] * 0.75, baseline_params['Cd'] * 1.25),
-            'Cl': (baseline_params['Cl'] * 0.75, baseline_params['Cl'] * 1.25),
+            'TYRE_LAT_B':  (5.0,  21.0),
+            'TYRE_LAT_a2': (0.5,  5.0),
+            'TYRE_LON_B':  (5.0,  21.0),
+            'TYRE_LON_a2': (1.5,  2.5),
+            'M':  (baseline_params['M']  * 0.85, baseline_params['M']  * 1.15),
+            'Cd': (baseline_params['Cd'] * 0.85, baseline_params['Cd'] * 1.15),
+            'Cl': (baseline_params['Cl'] * 0.85, baseline_params['Cl'] * 1.15),
         }
 
-        # Start with diagonal covariance — decoupled per-parameter updates
-        self.P = np.eye(len(self.adaptive_param_names)) * 100
-        self.param_vector = self._params_to_vector()
+        # RLS state: param_vector stores DEVIATIONS (dtheta = theta_true - theta_est), starting at zero
+        self.P = np.eye(len(self.adaptive_param_names)) * 0.1  # Very small initial covariance for stability
+        self.param_vector = np.zeros(len(self.adaptive_param_names))  # Start with no deviation
 
         self.residual_history = []
         self.param_history    = []
@@ -132,7 +132,7 @@ class OnlineParameterAdapter:
         for i, sigma in enumerate(slip_ratios):
             Fz = Fz_kN_wheels[2 + i]   # rear wheels
             D  = a1_lon * Fz + a2_lon
-            s  = float(sigma) * 100     # convert to % as used in twin_track
+            s  = float(sigma)      # convert to % as used in twin_track
             arg      = B_lon * s - E_lon * (B_lon * s - np.arctan(B_lon * s))
             darg_dB  = s * (1 - E_lon) + E_lon * s / (1 + (B_lon * s) ** 2)
             cos_term = np.cos(C_lon * np.arctan(arg))
@@ -150,6 +150,7 @@ class OnlineParameterAdapter:
             0.0,   # Cd  not estimated from tyre forces
             0.0,   # Cl  not estimated from tyre forces
         ])
+
         return phi
 
     # ------------------------------------------------------------------
@@ -158,52 +159,114 @@ class OnlineParameterAdapter:
 
     def update_rls(self, slip_angles, slip_ratios, Fz_kN_wheels,
                    lateral_force_error, longitudinal_force_error,
-                   adaptive_factor=0.995):
+                   acceleration_error=0.0, speed_error=0.0,
+                   adaptive_factor=0.98, debug=False):
         """
-        Recursive least squares update using Pacejka sensitivity as regressor.
-
+        Recursive least squares update - simple scalar RLS per parameter.
+        
+        CORRECTED FORMULATION:
+        We want to estimate dtheta = theta_true - theta_est from force errors.
+        The relationship is: force_error ≈ phi * dtheta
+        So we estimate dtheta, then set theta_new = theta_old + dtheta_change
+        
         Args:
             slip_angles:              array [alpha_fl, alpha_fr, alpha_rl, alpha_rr] degrees
             slip_ratios:              array [sigma_rl, sigma_rr] dimensionless
             Fz_kN_wheels:             array [Fz_fl, Fz_fr, Fz_rl, Fz_rr] kN
-            lateral_force_error:      scalar lateral force residual (N)
+            lateral_force_error:      scalar lateral force residual (N): true_force - predicted_force
             longitudinal_force_error: scalar longitudinal force residual (N)
-            adaptive_factor:          forgetting factor lambda (0.99-0.999 for slow drift)
+            acceleration_error:       scalar acceleration error (m/s^2)
+            speed_error:              scalar speed error (m/s)
+            adaptive_factor:          forgetting factor (0.95-0.99)
+            debug:                    print debug info
         """
+        # Compute sensitivities
         phi = self._compute_pacejka_regressor(slip_angles, slip_ratios, Fz_kN_wheels)
-
-        # Build measurement vector aligned with param order
-        # [lat_B, lat_a2, lon_B, lon_a2, M, Cd, Cl]
+        
+        # Build measurement vector = force errors (in Newtons, not divided)
+        # Keep signals in their natural units for better RLS performance
         y = np.array([
-            lateral_force_error,
-            lateral_force_error,
-            longitudinal_force_error,
-            longitudinal_force_error,
-            0.0,
-            0.0,
-            0.0,
+            lateral_force_error,                # [0] lat force error (N)
+            lateral_force_error,                # [1] lat force error (N)
+            longitudinal_force_error,           # [2] lon force error (N)
+            longitudinal_force_error,           # [3] lon force error (N)
+            acceleration_error,                 # [4] acceleration error (m/s^2)
+            speed_error,                        # [5] speed error (m/s)
+            speed_error * 0.5,                  # [6] speed error (m/s)
         ])
-
-        # Decoupled scalar RLS per parameter — prevents covariance explosion
+        
+        if debug:
+            print(f"[RLS] phi = {phi}")
+            print(f"[RLS] y = {y}")
+            print(f"[RLS] param_vector = {self.param_vector}")
+        
+        # Scalar RLS update for each parameter independently
+        # Model: force_error = phi_i * dtheta_i + noise
+        # where dtheta_i is the parameter error (true - estimated)
         for i in range(len(self.adaptive_param_names)):
             phi_i = phi[i]
-            if abs(phi_i) < 1e-6:
-                continue   # parameter has no influence at this operating point
-
-            p_i   = self.P[i, i]
-            k_i   = p_i * phi_i / (adaptive_factor + phi_i * p_i * phi_i)
-            error_i = y[i] - phi_i * self.param_vector[i]
+            y_i   = y[i]
+            
+            # Skip if sensitivity is too small (except for M, Cd, Cl)
+            if abs(phi_i) < 1e-8:
+                if i >= 4:  # M, Cd, Cl have near-zero sensitivities from tire forces
+                    phi_i = 1.0 if y_i != 0 else 0.0
+                else:
+                    continue
+            
+            # Estimate the parameter error: dtheta_est
+            # We maintain dtheta_est in param_vector temporarily
+            # The interpretation is: param_vector[i] represents dtheta_est
+            p_i = self.P[i, i]
+            
+            # Gain: k = p / (λ + φ^2*p)
+            denom = adaptive_factor + phi_i ** 2 * p_i
+            k_i = p_i * phi_i / (denom + 1e-12)
+            
+            # Error: e = y - phi*dtheta_est
+            error_i = y_i - phi_i * self.param_vector[i]
+            
+            # Update dtheta_est: dtheta += k*e
+            theta_before = self.param_vector[i]
             self.param_vector[i] += k_i * error_i
-            self.P[i, i] = np.clip(
-                (1.0 / adaptive_factor) * (1 - k_i * phi_i) * p_i,
-                1e-6, 1e4
-            )
-
-        self.param_vector = self._apply_bounds(self.param_vector)
-        self.current_params = self._vector_to_params(self.param_vector)
-
-        self.residual_history.append(y.copy())
-        self.param_history.append(self.param_vector.copy())
+            
+            if debug and i == 1:
+                print(f"[RLS] i=1 (TYRE_LAT_a2):")
+                print(f"  phi_i={phi_i:.6f}, y_i={y_i:.6f}, dtheta_est={theta_before:.6f}")
+                print(f"  p_i={p_i:.6f}, k_i={k_i:.6f}, error_i={error_i:.6f}")
+                print(f"  dtheta after update: {self.param_vector[i]:.6f}")
+            
+            # Update covariance with light refresh for stability
+            p_new = (1.0 / adaptive_factor) * (1.0 - k_i * phi_i) * p_i
+            # Very conservative refresh to minimize oscillations
+            # Only allow gradual re-exploration after convergence
+            if i < 4:
+                refresh = 0.005  # Very conservative for tire parameters
+            else:
+                refresh = 0.01  # Conservative for M, Cd, Cl
+            self.P[i, i] = np.clip(p_new + refresh, 0.05, 20.0)
+        
+        # Apply bounds to parameter DEVIATIONS to prevent runaway
+        # The param_vector now represents dtheta (parameter deviations)
+        # We want to keep dtheta reasonable: ±20% of baseline
+        for i in range(len(self.adaptive_param_names)):
+            name = self.adaptive_param_names[i]
+            baseline_val = self._extract_vector(self.baseline_params)[i]
+            max_dev = baseline_val * 0.2  # Allow ±20% deviation
+            self.param_vector[i] = np.clip(self.param_vector[i], -max_dev, max_dev)
+        
+        # Reconstruct actual parameters: theta_est = theta_baseline + dtheta_est
+        baseline_vector = self._extract_vector(self.baseline_params)
+        actual_params_vector = baseline_vector + self.param_vector
+        
+        # Also apply absolute bounds
+        actual_params_vector = self._apply_bounds(actual_params_vector)
+        
+        # Convert back to params dict
+        self.current_params = self._vector_to_params(actual_params_vector)
+        
+        # Store history (store the actual params, not deltas)
+        self.param_history.append(actual_params_vector.copy())
 
     # ------------------------------------------------------------------
     # Gradient-based update (unchanged)
@@ -284,8 +347,8 @@ class OnlineParameterAdapter:
 
     def reset_to_baseline(self):
         self.current_params   = self.baseline_params.copy()
-        self.param_vector     = self._extract_vector(self.baseline_params)
-        self.P                = np.eye(len(self.adaptive_param_names)) * 100
+        self.param_vector     = np.zeros(len(self.adaptive_param_names))  # Reset to no deviation
+        self.P                = np.eye(len(self.adaptive_param_names)) * 0.1
         self.residual_history = []
         self.param_history    = []
         self.adaptation_log   = []

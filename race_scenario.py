@@ -195,9 +195,11 @@ def run_race_scenario(irdas: IRDAS, n_laps: int = N_LAPS,
         lap_residuals = []
         lap_vx        = []
 
-        # Reset vehicle speed at lap start — simulates completing a lap circuit
+        # Reset vehicle state at lap start, but NOT the parameter adapter
         reset_state = INITIAL_STATE.copy()
         irdas.true_state = reset_state.copy()
+        irdas.kalman_filter.reset(reset_state)  # Reset KF state only, not params
+        irdas.real_simulator.reset_history()    # Clear history for this lap
 
         # Update "real" vehicle tyre params for this lap
         degraded_params = degrade_tyre_params(irdas.baseline_params, lap, n_laps)
