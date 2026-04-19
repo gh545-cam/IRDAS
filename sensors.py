@@ -15,6 +15,8 @@ DEFAULT_NOISE = {
     'vy':              0.1,
     'rpm':            20.0,    # RPM sensor:         ±20 RPM
     'wheel_speed':     0.05,   # Wheel speed sensor: ±0.05 m/s
+    'fuel_flow':       0.002,  # Fuel flow sensor:   ±0.002 kg/s
+    'mass':            2.0,    # Mass estimate:      ±2.0 kg
 }
  
  
@@ -36,7 +38,7 @@ class SensorSimulator:
         [x, y, ax_imu, ay_imu, r, vx, vy, rpm, wheel_speed_avg]
     """
  
-    def __init__(self, noise_std: dict = None, dt: float = 0.05):
+    def __init__(self, noise_std: dict = None, dt: float = 0.05, initial_mass: float = 752.0):
         """
         Args:
             noise_std: dict of noise standard deviations (uses DEFAULT_NOISE if None)
@@ -44,13 +46,19 @@ class SensorSimulator:
         """
         self.dt = dt
         self.noise = {**DEFAULT_NOISE, **(noise_std or {})}
+        self.initial_mass = float(initial_mass)
+        self.estimated_mass = float(initial_mass)
  
         # Store previous state to compute velocity derivatives for ax/ay
         self.prev_state = None
  
-    def reset(self):
+    def reset(self, initial_mass: float = None):
         """Reset sensor memory (call at start of each new simulation run)."""
         self.prev_state = None
+        if initial_mass is None:
+            self.estimated_mass = float(self.initial_mass)
+        else:
+            self.estimated_mass = float(initial_mass)
  
     def measure(self, true_state: np.ndarray) -> np.ndarray:
         """
@@ -103,8 +111,34 @@ class SensorSimulator:
  
         # Store current state as previous for next step
         self.prev_state = true_state.copy()
- 
+
         return z_true + noise_vec
+
+    def estimate_fuel_flow(self, true_state: np.ndarray, control: np.ndarray) -> float:
+        """
+        Estimate fuel flow [kg/s] from engine operating point.
+        """
+        rpm = float(np.clip(true_state[10], 1000.0, 15500.0))
+        throttle = float(np.clip(control[1], 0.0, 1.0))
+        brake = float(np.clip(control[2], 0.0, 1.0))
+        base_idle = 0.0035
+        load_term = 0.018 * throttle * (rpm / 12000.0)
+        brake_cut = 0.5 if brake > 0.2 and throttle < 0.1 else 1.0
+        fuel_flow = (base_idle + load_term) * brake_cut
+        return max(fuel_flow, 5e-4)
+
+    def measure_fuel_system(self, true_state: np.ndarray, control: np.ndarray,
+                            true_mass_kg: float) -> tuple[float, float]:
+        """
+        Return noisy fuel-flow and mass measurements.
+        """
+        fuel_flow_true = self.estimate_fuel_flow(true_state, control)
+        fuel_flow_measured = fuel_flow_true + np.random.normal(0, self.noise['fuel_flow'])
+        fuel_flow_measured = max(float(fuel_flow_measured), 0.0)
+
+        mass_measured = float(true_mass_kg) + np.random.normal(0, self.noise['mass'])
+        self.estimated_mass = max(100.0, mass_measured)
+        return fuel_flow_measured, self.estimated_mass
  
     def _compute_imu(self, true_state: np.ndarray,
                      vx: float, vy: float, r: float):

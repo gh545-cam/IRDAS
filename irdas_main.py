@@ -98,6 +98,7 @@ class IRDAS:
         """
         self.baseline_params = baseline_params.copy()
         self.true_state = np.array([0., 0., 0., 30., 0., 0., 30., 30., 30., 30., 8000., 4., 0.5])
+        self.true_vehicle_mass = float(self.baseline_params.get('M', 752.0))
         self.nn_trained = False 
         self.device = device
         self.use_nn = use_nn
@@ -121,6 +122,9 @@ class IRDAS:
             'true_states': [],
             'estimated_states': [],
             'measured_states': [],
+            'fuel_flow_measured': [],
+            'true_vehicle_mass': [],
+            'estimated_vehicle_mass': [],
             'controls': [],
             'residuals': [],
             'model_errors': [],
@@ -130,7 +134,7 @@ class IRDAS:
         
         self.time_step = 0.0
         self.dt = 0.05
-        self.sensor_sim = SensorSimulator(dt=self.dt)
+        self.sensor_sim = SensorSimulator(dt=self.dt, initial_mass=self.true_vehicle_mass)
 
     def initialize_real_vehicle(self, true_params=None, seed=None):
         """
@@ -141,6 +145,8 @@ class IRDAS:
             seed: random seed for reproducibility
         """
         self.real_simulator = RealVehicleSimulator(true_params=true_params, seed=seed)
+        self.true_vehicle_mass = float(self.real_simulator.true_params.get('M', self.true_vehicle_mass))
+        self.sensor_sim.reset(initial_mass=self.true_vehicle_mass)
         print(f"Real vehicle initialized with parameter differences:")
         for name, diff in self.real_simulator.get_parameter_difference().items():
             print(f"  {name}: {diff:+.4f}")
@@ -356,14 +362,22 @@ class IRDAS:
         # Step 1: Get true state from real vehicle simulator
         
         true_state_before = self.true_state.copy()          # snapshot BEFORE step
+        # Fuel-flow sensor drives mass depletion; this mass is treated as measured (not RLS-estimated).
+        fuel_flow_true = self.sensor_sim.estimate_fuel_flow(true_state_before, control)
+        self.true_vehicle_mass = max(100.0, self.true_vehicle_mass - fuel_flow_true * self.dt)
+        if self.real_simulator is not None:
+            self.real_simulator.true_params['M'] = self.true_vehicle_mass
         true_state_next = self.real_simulator.step(self.true_state, control, self.dt)
         self.true_state = true_state_next.copy()
 
         # Step 2: Generate noisy measurement from true state
         measurement = self.sensor_sim.measure(true_state_next)
+        fuel_flow_measured, mass_sensor_kg = self.sensor_sim.measure_fuel_system(
+            true_state_next, control, self.true_vehicle_mass
+        )
         
         # Step 3: Kalman filter prediction (baseline model)
-        self.kalman_filter.predict(control, self.dt)
+        self.kalman_filter.predict(control, self.dt, fuel_flow_kgps=fuel_flow_measured)
         
         # Step 4: NN-based residual correction (optional, uses reduced 7-state space)
         if use_nn_correction and self.nn_trained:
@@ -378,7 +392,7 @@ class IRDAS:
             self.kalman_filter.x = corrected_full_state
         
         # Step 5: Kalman filter update
-        self.kalman_filter.update(measurement)
+        self.kalman_filter.update(measurement, mass_sensor_kg=mass_sensor_kg)
         estimated_state = self.kalman_filter.get_state()
         
         # Step 6: Compute residual for parameter adaptation
@@ -428,7 +442,7 @@ class IRDAS:
                 slip_ratios = np.clip(slip_ratios, -1.0, 1.0)
 
                 # --- approximate normal forces (static split, good enough for RLS) ---
-                M_veh = self.baseline_params.get('M',  752.0)
+                M_veh = self.kalman_filter.get_mass_estimate()
                 g     = 9.81
                 Fz_front = M_veh * g * Lr / L / 2.0 / 1000.0   # kN per front wheel
                 Fz_rear  = M_veh * g * Lf / L / 2.0 / 1000.0   # kN per rear wheel
@@ -468,13 +482,8 @@ class IRDAS:
                     for i in range(2)
                 )
                 lon_force_error = lon_force_real - lon_force_baseline
-                # --- Additional signals for M, Cd, Cl adaptation ---
-                # M (mass): estimated from longitudinal force error scaled by speed
-                # Higher vx -> same force error means bigger M error
-                acceleration_error = lon_force_error / max(abs(vx), 1.0) if abs(vx) > 0.5 else 0.0
-                
+                # --- Additional signals for Cd, Cl adaptation ---
                 # Cd (drag): estimated from sustained speed error
-                # Use raw vx error as signal for drag coefficient
                 speed_error = model_error[3]  # vx error -> drag/downforce effect
                 
                 # Improve drag signal with throttle state
@@ -486,11 +495,11 @@ class IRDAS:
                 self.param_adapter.update_rls(
                     slip_angles, slip_ratios, Fz_kN_wheels,
                     lat_force_error, lon_force_error,
-                    acceleration_error=acceleration_error,
                     speed_error=speed_error,
                     adaptive_factor=0.95
                 )
                 self.current_params = self.param_adapter.get_current_params()
+                self.current_params['M'] = self.kalman_filter.get_mass_estimate()
 
                 # --- Fix 4: push adapted params back into the Kalman filter ---
                 self.kalman_filter.params = self.current_params
@@ -500,6 +509,9 @@ class IRDAS:
         self.history['true_states'].append(true_state_next.copy())
         self.history['estimated_states'].append(estimated_state.copy())
         self.history['measured_states'].append(measurement.copy())
+        self.history['fuel_flow_measured'].append(float(fuel_flow_measured))
+        self.history['true_vehicle_mass'].append(float(self.true_vehicle_mass))
+        self.history['estimated_vehicle_mass'].append(float(self.kalman_filter.get_mass_estimate()))
         self.history['controls'].append(control.copy())
         self.history['residuals'].append(model_error.copy())
         self.history['model_errors'].append(residual)
@@ -580,10 +592,16 @@ class IRDAS:
             initial_state = np.array([0., 0., 0., 30., 0., 0., 
                                     30., 30., 30., 30., 8000., 4., 0.5])
         self.true_state = initial_state.copy()
+        if self.real_simulator is not None:
+            self.true_vehicle_mass = float(self.real_simulator.true_params.get('M', self.baseline_params.get('M', 752.0)))
+        else:
+            self.true_vehicle_mass = float(self.baseline_params.get('M', 752.0))
         self.kalman_filter.reset(initial_state)
-        self.sensor_sim.reset()
-        self.real_simulator.reset_history()
-        self.param_adapter.reset_to_baseline()  # CRITICAL: reset parameter adapter
+        self.sensor_sim.reset(initial_mass=self.true_vehicle_mass)
+        if self.real_simulator is not None:
+            self.real_simulator.reset_history()
+        if self.use_rls and hasattr(self, 'param_adapter'):
+            self.param_adapter.reset_to_baseline()  # CRITICAL: reset parameter adapter
         self.history = {k: [] for k in self.history}  # clear history
         self.time_step = 0.0
         self.nn_trained = True if (self.use_nn and hasattr(self, 'nn_learner')) else False

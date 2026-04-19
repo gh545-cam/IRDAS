@@ -1,6 +1,6 @@
 """
 Online parameter adaptation for real-time tuning of vehicle model parameters.
-Adapts tire coefficients, mass, and aero parameters based on observed residuals.
+Adapts tyre and aerodynamic parameters based on observed residuals.
 """
 import numpy as np
 from scipy.optimize import least_squares
@@ -20,13 +20,12 @@ class OnlineParameterAdapter:
 
         self.adaptive_param_names = [
             'TYRE_LAT_a2', 'TYRE_LON_a2',
-            'M', 'Cd', 'Cl'
+            'Cd', 'Cl'
         ]
 
         self.param_bounds = {
             'TYRE_LAT_a2': (1.0,  3.0),
             'TYRE_LON_a2': (1.0,  3.0),
-            'M':  (baseline_params['M']  * 0.85, baseline_params['M']  * 1.15),
             'Cd': (baseline_params['Cd'] * 0.85, baseline_params['Cd'] * 1.15),
             'Cl': (baseline_params['Cl'] * 0.85, baseline_params['Cl'] * 1.15),
         }
@@ -47,7 +46,6 @@ class OnlineParameterAdapter:
         return np.array([
             self.current_params['TYRE_LAT']['a2'],
             self.current_params['TYRE_LON']['a2'],
-            self.current_params['M'],
             self.current_params['Cd'],
             self.current_params['Cl'],
         ])
@@ -58,16 +56,14 @@ class OnlineParameterAdapter:
         params['TYRE_LON'] = params['TYRE_LON'].copy()
         params['TYRE_LAT']['a2'] = vector[0]
         params['TYRE_LON']['a2'] = vector[1]
-        params['M']  = vector[2]
-        params['Cd'] = vector[3]
-        params['Cl'] = vector[4]
+        params['Cd'] = vector[2]
+        params['Cl'] = vector[3]
         return params
 
     def _extract_vector(self, params):
         return np.array([
             params['TYRE_LAT']['a2'],
             params['TYRE_LON']['a2'],
-            params['M'],
             params['Cd'],
             params['Cl'],
         ])
@@ -132,14 +128,13 @@ class OnlineParameterAdapter:
             dF_da2_lon += np.sin(C_lon * np.arctan(arg))
 
         # phi order matches adaptive_param_names:
-        # [TYRE_LAT_B, TYRE_LAT_a2, TYRE_LON_B, TYRE_LON_a2, M, Cd, Cl]
+        # [TYRE_LAT_a2, TYRE_LON_a2, Cd, Cl]
         vx   = self._last_vx if hasattr(self, '_last_vx') else 25.0
         Area = self.baseline_params.get('Area', 1.2)
         aero_sens = 0.5 * Area * vx ** 2
         phi = np.array([
             dF_da2_lat,          # TYRE_LAT_a2
             dF_da2_lon,          # TYRE_LON_a2
-            0.0,                 # M
             aero_sens,           # Cd
             aero_sens,           # Cl
         ])
@@ -168,7 +163,7 @@ class OnlineParameterAdapter:
             Fz_kN_wheels:             array [Fz_fl, Fz_fr, Fz_rl, Fz_rr] kN
             lateral_force_error:      scalar lateral force residual (N): true_force - predicted_force
             longitudinal_force_error: scalar longitudinal force residual (N)
-            acceleration_error:       scalar acceleration error (m/s^2)
+            acceleration_error:       unused (kept for API compatibility)
             speed_error:              scalar speed error (m/s)
             adaptive_factor:          forgetting factor (0.95-0.99)
             debug:                    print debug info
@@ -178,12 +173,10 @@ class OnlineParameterAdapter:
         
         # Build measurement vector = force errors (in Newtons, not divided)
         # Keep signals in their natural units for better RLS performance
-        lat_scaled = lateral_force_error * 3.0
         y = np.array([
             lateral_force_error,       # TYRE_LAT_a2
             longitudinal_force_error,  # TYRE_LON_a2
-            acceleration_error,        # M
-            -longitudinal_force_error, # Cd
+            -speed_error,              # Cd
             lateral_force_error * 0.1, # Cl
         ])
         
@@ -199,9 +192,9 @@ class OnlineParameterAdapter:
             phi_i = phi[i]
             y_i   = y[i]
             
-            # Skip if sensitivity is too small (except for M, Cd, Cl)
+            # Skip if sensitivity is too small (except for Cd, Cl fallback channels)
             if abs(phi_i) < 1e-8:
-                if i >= 4:  # M, Cd, Cl have near-zero sensitivities from tire forces
+                if i >= 2:  # Cd, Cl can have weak direct sensitivities
                     phi_i = 1.0 if y_i != 0 else 0.0
                 else:
                     continue
@@ -296,7 +289,7 @@ class OnlineParameterAdapter:
             param_delta   = param_vec - self._extract_vector(self.baseline_params)
             regularisation = 0.1 * np.dot(param_delta, param_delta)
             residual_term  = (abs(lat_err) * abs(param_vec[0] - self.param_vector[0]) +
-                              abs(lon_err) * abs(param_vec[2] - self.param_vector[2]))
+                              abs(lon_err) * abs(param_vec[1] - self.param_vector[1]))
             return residual_term + regularisation
 
         x0 = self.param_vector.copy()
