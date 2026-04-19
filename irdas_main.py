@@ -105,6 +105,7 @@ class IRDAS:
         self.device = device
         self.use_nn = use_nn
         self.use_rls = use_rls
+        self.use_stateful_nn_inference = True
         # Components
         self.real_simulator = None  # initialized with true params
         self.kalman_filter = ExtendedKalmanFilter(baseline_params)
@@ -243,6 +244,7 @@ class IRDAS:
         
         self.nn_trained = True
         print("Neural network training complete!")
+        self.nn_learner.reset_stateful_inference()
     
     def _apply_nn_residual_correction(self, full_state, control, correction_scale=0.1):
         """
@@ -282,7 +284,11 @@ class IRDAS:
         
         # Get NN prediction for residuals using the proper predict method
         # This handles normalization and tensor conversions correctly
-        residual_correction = self.nn_learner.predict(state_dynamics, control)
+        residual_correction = self.nn_learner.predict(
+            state_dynamics,
+            control,
+            stateful=self.use_stateful_nn_inference
+        )
         
         # Apply residual correction to the 7 dynamics states
         corrected_state[dynamics_indices] = full_state[dynamics_indices] + residual_correction * correction_scale
@@ -320,7 +326,8 @@ class IRDAS:
         
         return corrected_state
     
-    def step(self, control, measurement_noise_std=None, use_nn_correction=True, use_param_adaptation=True):
+    def step(self, control, measurement_noise_std=None, use_nn_correction=True,
+             use_param_adaptation=True, reset_nn_memory=False):
         """
         Execute one time step of IRDAS with full state reconstruction.
         
@@ -343,10 +350,14 @@ class IRDAS:
             measurement_noise_std: dict with sensor noise std devs
             use_nn_correction: whether to use NN for residual correction (7-state only)
             use_param_adaptation: whether to adapt parameters
+            reset_nn_memory: if True, resets recurrent residual-memory state before this step
             
         Returns:
             estimated_state: Kalman filter estimated full 13-state
         """
+        if reset_nn_memory and self.use_nn and hasattr(self, 'nn_learner'):
+            self.nn_learner.reset_stateful_inference()
+
         step_num = len(self.history['true_states'])
         if step_num < 3:
             print(f"\n--- Step {step_num} RAW ---")
@@ -589,6 +600,30 @@ class IRDAS:
                       f"Model error: {self.history['model_errors'][-1]:.4f}")
         
         print(f"\nSimulation complete! Ran {len(self.history['true_states'])} steps")
+
+    def reset_residual_memory(self):
+        """
+        Reset recurrent residual-model memory.
+        Call this at events such as tire changes, major setup changes, or pit stops.
+        """
+        if self.use_nn and hasattr(self, 'nn_learner'):
+            self.nn_learner.reset_stateful_inference()
+
+    def on_tire_change(self, reset_parameter_adapter=False):
+        """
+        Domain helper for pit-stop tire change events.
+        Resets recurrent NN memory and optionally resets online parameter adaptation.
+
+        Args:
+            reset_parameter_adapter: when True, also resets RLS parameter adaptation
+                                     to baseline to reflect fresh-tire conditions.
+        """
+        self.reset_residual_memory()
+        if reset_parameter_adapter and self.use_rls and hasattr(self, 'param_adapter'):
+            self.param_adapter.reset_to_baseline()
+            self.current_params = self.param_adapter.get_current_params()
+            self.kalman_filter.params = self.current_params
+
     def reset(self, initial_state=None):
         """Reset IRDAS between scenarios."""
         if initial_state is None:
@@ -605,6 +640,9 @@ class IRDAS:
             self.real_simulator.reset_history()
         if self.use_rls and hasattr(self, 'param_adapter'):
             self.param_adapter.reset_to_baseline()  # CRITICAL: reset parameter adapter
+            self.current_params = self.param_adapter.get_current_params()
+        if self.use_nn and hasattr(self, 'nn_learner'):
+            self.nn_learner.reset_stateful_inference()
         self.history = {k: [] for k in self.history}  # clear history
         self.time_step = 0.0
         self.nn_trained = True if (self.use_nn and hasattr(self, 'nn_learner')) else False
@@ -734,6 +772,7 @@ class IRDAS:
         """Load pretrained neural network."""
         if self.use_nn:
             self.nn_learner.load(model_path)
+            self.nn_learner.reset_stateful_inference()
             self.nn_trained = True
             print(f"Loaded pretrained network from {model_path}")
 

@@ -86,6 +86,7 @@ def test_scenario_1_highway_driving(irdas, duration_seconds=30):
     # Reset history
     irdas.history = {
         'true_states': [], 'estimated_states': [], 'measured_states': [],
+        'fuel_flow_measured': [], 'true_vehicle_mass': [], 'estimated_vehicle_mass': [],
         'controls': [], 'residuals': [], 'model_errors': [], 'param_changes': [],
         'timestamps': []
     }
@@ -136,6 +137,7 @@ def test_scenario_2_aggressive_handling(irdas, duration_seconds=20):
     # Reset history
     irdas.history = {
         'true_states': [], 'estimated_states': [], 'measured_states': [],
+        'fuel_flow_measured': [], 'true_vehicle_mass': [], 'estimated_vehicle_mass': [],
         'controls': [], 'residuals': [], 'model_errors': [], 'param_changes': [],
         'timestamps': []
     }
@@ -203,6 +205,7 @@ def test_scenario_3_slalom(irdas, duration_seconds=25):
     # Reset history
     irdas.history = {
         'true_states': [], 'estimated_states': [], 'measured_states': [],
+        'fuel_flow_measured': [], 'true_vehicle_mass': [], 'estimated_vehicle_mass': [],
         'controls': [], 'residuals': [], 'model_errors': [], 'param_changes': [],
         'timestamps': []
     }
