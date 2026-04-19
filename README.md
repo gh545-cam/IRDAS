@@ -11,15 +11,17 @@ IRDAS integrates four key components:
 - Simulates tire coefficient variations, mass changes, aerodynamic differences
 - Creates the ground truth for training and validation
 
-### 2. **Extended Kalman Filter** (`kalman_filter.py`)
+### 2. **Unscented Kalman Filter (UKF)** (`kalman_filter.py`)
 - State estimation from noisy sensor measurements (IMU, GPS, wheel speed sensors)
 - Handles combined longitudinal and lateral vehicle dynamics
 - Reduces measurement noise and provides smooth state estimates
 
-### 3. **Residual Dynamics Neural Network** (`residual_network.py`)
+### 3. **Recurrent Residual Dynamics Network** (`residual_network.py`)
 - Learns the difference between baseline model and real vehicle
 - Trained on simulated data with various driving conditions
 - Provides correction terms during runtime for improved prediction
+- Supports stateful inference for long-horizon memory (e.g., tire/suspension history)
+- Includes PINN-style regularizers (traction-circle and steering-symmetry priors)
 
 ### 4. **Online Parameter Adapter** (`parameter_adapter.py`)
 - Recursive Least Squares (RLS) adaptation for tire parameters
