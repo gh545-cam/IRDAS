@@ -1,7 +1,7 @@
 """
 race_scenario.py — Tyre Degradation Race Scenario
 
-Simulates a 30-lap stint where tyre grip degrades progressively.
+Simulates a 30-lap stint where tyre grip degrades progressively and fuel mass burns down.
 Compares three prediction sources at each lap:
 
     1. Theoretical degradation  — what the physics model says grip should be
@@ -47,6 +47,10 @@ except ImportError:
 N_LAPS           = 30
 STEPS_PER_LAP    = 400          # 400 × 0.05s = 20s per lap
 DT               = 0.05
+TRACK_LENGTH_M   = 5200.0       # Representative modern race-track lap length
+MIN_VALID_SPEED_MPS = 0.1
+DYNAMIC_STATE_START = 3
+DYNAMIC_STATE_END = 10
 INITIAL_STATE    = np.array([0., 0., 0., 30., 0., 0.,
                               30., 30., 30., 30., 8000., 4., 0.5])
 
@@ -168,94 +172,109 @@ def run_race_scenario(irdas: IRDAS, n_laps: int = N_LAPS,
     # Per-lap tracking
     laps                  = list(range(n_laps))
     theoretical_grips     = []
-    rls_lat_B             = []      # adapted lateral stiffness
-    rls_lat_a2            = []      # adapted peak friction
+    rls_lat_B             = []
+    rls_lat_a2            = []
     rls_lon_B             = []
-    nn_residual_magnitude = []      # mean |residual| per lap
-    lap_times             = []      # proxy: steps to complete lap
+    nn_residual_magnitude = []
+    lap_times             = []
     temperatures          = []
-    vx_history            = []      # mean vx per lap
+    vx_history            = []
+    model_error_rmse      = []
+    ekf_error_rmse        = []
+    true_mass_history     = []
+    estimated_mass_history = []
+    fuel_used_history     = []
 
-    # Generate OU controls for full stint upfront
-    total_steps  = n_laps * steps_per_lap
+    # Full-race state continuity (no per-lap reset) for realistic accumulation effects.
+    irdas.reset(INITIAL_STATE)
+    lap_start_mass = irdas.true_vehicle_mass
+
+    # Generate realistic race controls: straights, braking zones and corner exits.
     rng = np.random.default_rng(42)
-    ou_controls  = np.zeros((total_steps, 3))
-    steer, throttle = 0.0, 0.85
-    for i in range(total_steps):
-        # Sinusoidal steering simulates corners — 3 corners per lap
-        lap_phase    = (i % steps_per_lap) / steps_per_lap
-        corner_steer = 0.12 * np.sin(2 * np.pi * lap_phase * 3)
-        steer        = np.clip(corner_steer + rng.normal(0, 0.01), -0.20, 0.20)
-        throttle     = np.clip(throttle + rng.normal(0, 0.02), 0.75, 1.0)
-        ou_controls[i] = [steer, throttle, 0.0]
-
-    step_counter = 0
-
     for lap in range(n_laps):
         lap_residuals = []
-        lap_vx        = []
+        lap_vx = []
+        lap_model_error = []
+        lap_ekf_error = []
 
-        # Reset vehicle state at lap start, but NOT the parameter adapter
-        reset_state = INITIAL_STATE.copy()
-        irdas.true_state = reset_state.copy()
-        irdas.kalman_filter.reset(reset_state)  # Reset KF state only, not params
-        irdas.real_simulator.reset_history()    # Clear history for this lap
-
-        # Update "real" vehicle tyre params for this lap
+        # Apply lap-level tyre degradation to the "real" vehicle model.
         degraded_params = degrade_tyre_params(irdas.baseline_params, lap, n_laps)
         irdas.real_simulator.true_params.update({
             'TYRE_LAT': degraded_params['TYRE_LAT'],
             'TYRE_LON': degraded_params['TYRE_LON'],
         })
 
-        for _ in range(steps_per_lap):
-            u = ou_controls[step_counter]
-            step_counter += 1
+        for step in range(steps_per_lap):
+            lap_phase = step / steps_per_lap
+            if lap_phase < 0.35:  # long straight
+                steer = rng.normal(0.0, 0.005)
+                throttle = np.clip(0.92 + rng.normal(0, 0.02), 0.8, 1.0)
+                brake = 0.0
+            elif lap_phase < 0.48:  # heavy braking
+                steer = np.clip(0.02 * np.sin(2 * np.pi * lap_phase * 6), -0.06, 0.06)
+                throttle = np.clip(0.15 + rng.normal(0, 0.02), 0.0, 0.25)
+                brake = np.clip(0.45 + rng.normal(0, 0.05), 0.25, 0.65)
+            elif lap_phase < 0.72:  # medium-speed corner
+                steer = np.clip(0.17 * np.sin(2 * np.pi * (lap_phase - 0.48) * 2.5), -0.22, 0.22)
+                throttle = np.clip(0.55 + rng.normal(0, 0.03), 0.35, 0.75)
+                brake = 0.0
+            else:  # corner exit and short straight
+                steer = np.clip(0.08 * np.sin(2 * np.pi * (lap_phase - 0.72) * 4), -0.12, 0.12)
+                throttle = np.clip(0.82 + rng.normal(0, 0.03), 0.65, 0.95)
+                brake = 0.0
+
+            u = np.array([steer, throttle, brake], dtype=float)
 
             try:
-                estimated_state = irdas.step(
-                    u,
-                    use_nn_correction=True,
-                    use_param_adaptation=True
-                )
+                estimated_state = irdas.step(u, use_nn_correction=True, use_param_adaptation=True)
 
-                # Track NN residual magnitude
                 if irdas.nn_trained:
                     from residual_network import extract_dynamics_states
                     dyn_state = extract_dynamics_states(estimated_state)
-                    residual  = irdas.nn_learner.predict(dyn_state, u)
+                    residual = irdas.nn_learner.predict(dyn_state, u)
                     lap_residuals.append(np.linalg.norm(residual))
 
-                lap_vx.append(estimated_state[3])
-
+                lap_vx.append(float(estimated_state[3]))
+                lap_model_error.append(float(irdas.history['model_errors'][-1]))
+                # EKF accuracy metric focused on dynamic states (vx, vy, r, 4 wheel speeds).
+                lap_ekf_error.append(float(np.linalg.norm(
+                    (irdas.true_state - estimated_state)[DYNAMIC_STATE_START:DYNAMIC_STATE_END]
+                )))
             except Exception as e:
-                print(f"  Warning lap {lap+1}, step {step_counter}: {e}")
+                print(f"  Warning lap {lap+1}, step {step+1}: {e}")
                 continue
 
-        # Record theoretical values
         grip = theoretical_grip(lap, n_laps)
         temp = tyre_temperature(lap, n_laps)
         theoretical_grips.append(grip)
         temperatures.append(temp)
 
-        # Record RLS adapted parameters
         current = irdas.param_adapter.get_current_params()
         rls_lat_B.append(current['TYRE_LAT']['B'])
         rls_lat_a2.append(current['TYRE_LAT']['a2'])
         rls_lon_B.append(current['TYRE_LON']['B'])
 
-        # Record NN residual magnitude
         nn_residual_magnitude.append(np.mean(lap_residuals) if lap_residuals else 0.0)
+        mean_vx = np.mean(lap_vx) if lap_vx else 0.0
+        vx_history.append(mean_vx)
+        # Treat near-standstill laps as invalid for lap-time estimation.
+        if mean_vx <= MIN_VALID_SPEED_MPS:
+            lap_times.append(np.nan)
+        else:
+            lap_times.append(TRACK_LENGTH_M / mean_vx)
 
-        # Mean speed this lap
-        vx_history.append(np.mean(lap_vx) if lap_vx else 0.0)
+        model_error_rmse.append(float(np.sqrt(np.mean(np.square(lap_model_error)))) if lap_model_error else 0.0)
+        ekf_error_rmse.append(float(np.sqrt(np.mean(np.square(lap_ekf_error)))) if lap_ekf_error else 0.0)
 
-        print(f"  Lap {lap+1:>2}/{n_laps} | "
-              f"Grip: {grip:.3f} | "
-              f"Temp: {temp:.1f}°C | "
-              f"RLS a2: {rls_lat_a2[-1]:.3f} | "
-              f"NN |res|: {nn_residual_magnitude[-1]:.4f} | "
-              f"vx: {vx_history[-1]:.1f} m/s")
+        true_mass = float(irdas.true_vehicle_mass)
+        est_mass = float(irdas.kalman_filter.get_mass_estimate())
+        true_mass_history.append(true_mass)
+        estimated_mass_history.append(est_mass)
+        fuel_used_history.append(max(0.0, lap_start_mass - true_mass))
+        lap_start_mass = true_mass
+
+        print(f"  Lap {lap+1:>2}/{n_laps} | Grip {grip:.3f} | RLS a2 {rls_lat_a2[-1]:.3f} | "
+              f"EKF RMSE {ekf_error_rmse[-1]:.3f} | Fuel used {fuel_used_history[-1]:.2f} kg")
 
     results = {
         'laps':                   laps,
@@ -266,8 +285,15 @@ def run_race_scenario(irdas: IRDAS, n_laps: int = N_LAPS,
         'rls_lon_B':              rls_lon_B,
         'nn_residual_magnitude':  nn_residual_magnitude,
         'vx_history':             vx_history,
+        'lap_times':              lap_times,
+        'model_error_rmse':       model_error_rmse,
+        'ekf_error_rmse':         ekf_error_rmse,
+        'true_mass_history':      true_mass_history,
+        'estimated_mass_history': estimated_mass_history,
+        'fuel_used_history':      fuel_used_history,
         'baseline_lat_a2':        irdas.baseline_params['TYRE_LAT']['a2'],
         'baseline_lat_B':         irdas.baseline_params['TYRE_LAT']['B'],
+        'initial_mass':           float(irdas.baseline_params['M']),
         'n_laps':                 n_laps,
     }
 
@@ -298,7 +324,7 @@ def plot_race_results(results: dict, save_path: str = 'results/race_scenario.png
     # Compute RLS grip proxy: ratio of adapted a2 to baseline a2
     rls_grip_proxy = np.array(results['rls_lat_a2']) / baseline_a2
 
-    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    fig, axes = plt.subplots(3, 2, figsize=(14, 14))
     fig.suptitle('IRDAS Race Scenario: 30-Lap Tyre Degradation Stint',
                  fontsize=14, fontweight='bold', y=1.01)
 
@@ -366,22 +392,52 @@ def plot_race_results(results: dict, save_path: str = 'results/race_scenario.png
     ax.legend(lines1 + lines2, labels1 + labels2, fontsize=8)
     ax.grid(True, alpha=0.3)
 
-    # ── Panel 4: Mean speed per lap ──────────────────────────
+    # ── Panel 4: Mean speed + lap time per lap ───────────────
     ax = axes[1, 1]
     ax.plot(laps, results['vx_history'], '-D',
             color=colors['speed'], linewidth=2, markersize=5,
             label='Mean vx (estimated)')
     ax.set_xlabel('Lap')
     ax.set_ylabel('Mean Speed (m/s)')
-    ax.set_title('Estimated Speed per Lap')
-    ax.legend(fontsize=8)
+    ax.set_title('Estimated Speed and Lap Time')
+    ax2 = ax.twinx()
+    ax2.plot(laps, results['lap_times'], '--', color='black', linewidth=1.5, label='Lap time (s)')
+    ax2.set_ylabel('Lap Time (s)')
+    lines1, labels1 = ax.get_legend_handles_labels()
+    lines2, labels2 = ax2.get_legend_handles_labels()
+    ax.legend(lines1 + lines2, labels1 + labels2, fontsize=8)
     ax.grid(True, alpha=0.3)
+
+    # ── Panel 5: Mass tracking and fuel consumption ──────────
+    ax = axes[2, 0]
+    ax.plot(laps, results['true_mass_history'], '-o', linewidth=2, markersize=4, label='True mass')
+    ax.plot(laps, results['estimated_mass_history'], '-s', linewidth=2, markersize=4, label='EKF mass estimate')
+    ax.set_xlabel('Lap')
+    ax.set_ylabel('Vehicle Mass (kg)')
+    ax.set_title('Fuel Burn and Mass Estimation')
+    ax.grid(True, alpha=0.3)
+    ax2 = ax.twinx()
+    ax2.bar(laps, results['fuel_used_history'], alpha=0.2, color='tab:orange', label='Fuel used/lap')
+    ax2.set_ylabel('Fuel Used per Lap (kg)')
+    lines1, labels1 = ax.get_legend_handles_labels()
+    lines2, labels2 = ax2.get_legend_handles_labels()
+    ax.legend(lines1 + lines2, labels1 + labels2, fontsize=8)
+
+    # ── Panel 6: Accuracy metrics ─────────────────────────────
+    ax = axes[2, 1]
+    ax.plot(laps, results['model_error_rmse'], '-^', linewidth=2, markersize=4, label='Model RMSE')
+    ax.plot(laps, results['ekf_error_rmse'], '-v', linewidth=2, markersize=4, label='EKF dynamics RMSE')
+    ax.set_xlabel('Lap')
+    ax.set_ylabel('RMSE')
+    ax.set_title('Model and EKF Dynamics Accuracy per Lap')
+    ax.grid(True, alpha=0.3)
+    ax.legend(fontsize=8)
 
     # Temperature annotation on panel 1
     axes[0, 0].twinx().plot(laps, results['temperatures'], ':',
-                             color='purple', linewidth=1.2, alpha=0.5)
+                            color='purple', linewidth=1.2, alpha=0.5)
 
-    plt.tight_layout()
+    plt.tight_layout(rect=[0, 0, 1, 0.98])
     plt.savefig(save_path, dpi=150, bbox_inches='tight')
     print(f"\nPlot saved to {save_path}")
     return fig
@@ -426,6 +482,18 @@ def print_stint_summary(results: dict):
     print(f"  Mean speed lap {results['n_laps']}: {results['vx_history'][-1]:.2f} m/s")
     speed_drop = results['vx_history'][0] - results['vx_history'][-1]
     print(f"  Speed loss:        {speed_drop:.2f} m/s ({speed_drop/results['vx_history'][0]*100:.1f}%)")
+
+    print(f"\nMass and fuel analysis:")
+    print(f"  Start mass:        {results['initial_mass']:.2f} kg")
+    print(f"  End true mass:     {results['true_mass_history'][-1]:.2f} kg")
+    print(f"  End EKF mass:      {results['estimated_mass_history'][-1]:.2f} kg")
+    mass_error = abs(results['true_mass_history'][-1] - results['estimated_mass_history'][-1])
+    print(f"  Final mass error:  {mass_error:.2f} kg")
+    print(f"  Total fuel used:   {np.sum(results['fuel_used_history']):.2f} kg")
+
+    print(f"\nAccuracy summary:")
+    print(f"  Mean model RMSE:   {np.mean(results['model_error_rmse']):.4f}")
+    print(f"  Mean EKF RMSE:     {np.mean(results['ekf_error_rmse']):.4f}")
 
 
 # ─────────────────────────────────────────────

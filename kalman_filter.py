@@ -6,6 +6,8 @@ import numpy as np
 from scipy import linalg
 from twin_track import twin_track_model
 
+MIN_VEHICLE_MASS_KG = 100.0
+
 
 class ExtendedKalmanFilter:
     """
@@ -32,6 +34,14 @@ class ExtendedKalmanFilter:
         self.n_measurements = 9
         self.vx_prev = 30.0
         self.vy_prev = 0.0
+        # Separate scalar Kalman filter for vehicle mass driven by fuel-flow sensing.
+        self.mass_estimate = float(params.get('M', 752.0))
+        self.default_mass = self.mass_estimate
+        self.min_mass = max(MIN_VEHICLE_MASS_KG, 0.75 * self.mass_estimate)
+        self.mass_cov = 25.0
+        self.mass_process_noise = 1e-3
+        self.mass_measurement_noise = 4.0
+        self.mass_history = []
         # Initial state estimate
         self.x = np.array([0., 0., 0., 30., 0., 0., 30., 30., 30., 30., 8000., 4., 0.5])
         
@@ -66,16 +76,23 @@ class ExtendedKalmanFilter:
         self.dt = 0.05  # time step
         self.history = []
     
-    def predict(self, u, dt=None):
+    def predict(self, u, dt=None, fuel_flow_kgps=0.0):
         """
         Prediction step: propagate state estimate using dynamics model.
         
         Args:
             u: control input [steering, throttle, brake]
             dt: time step (uses self.dt if None)
+            fuel_flow_kgps: measured fuel mass flow [kg/s]
         """
         if dt is None:
             dt = self.dt
+
+        # Predict vehicle mass from fuel flow before propagating dynamics.
+        fuel_consumed = max(0.0, float(fuel_flow_kgps)) * dt
+        self.mass_estimate = max(self.min_mass, self.mass_estimate - fuel_consumed)
+        self.mass_cov = self.mass_cov + self.mass_process_noise
+        self.params['M'] = self.mass_estimate
         
         # Propagate mean estimate through nonlinear dynamics
         self.x = twin_track_model(self.x, u, dt, self.params)
@@ -99,12 +116,13 @@ class ExtendedKalmanFilter:
         self.P = 0.5 * (self.P + self.P.T)
         self.vx_prev = self.x[3]
         self.vy_prev = self.x[4]
-    def update(self, z):
+    def update(self, z, mass_sensor_kg=None):
         """
         Update step: incorporate measurement into state estimate.
         
         Args:
             z: measurement vector [ax, ay, r, vx_gps, vy_gps, engine_rpm, wheel_speed_avg]
+            mass_sensor_kg: direct noisy mass measurement [kg]
         """
         # Measurement function: which states we measure
         # z = h(x) = [vx, vy, r, vx, vy, rpm, (vw_fl + vw_fr + vw_rl + vw_rr)/4]
@@ -149,6 +167,17 @@ class ExtendedKalmanFilter:
         self.P[11, :] = 0.0
         self.P[:, 11] = 0.0
         self.x[2] = np.arctan2(np.sin(self.x[2]), np.cos(self.x[2]))
+
+        # Scalar mass Kalman update from fuel system mass sensing.
+        if mass_sensor_kg is not None:
+            z_m = float(mass_sensor_kg)
+            innovation = z_m - self.mass_estimate
+            s_m = self.mass_cov + self.mass_measurement_noise
+            k_m = self.mass_cov / (s_m + 1e-12)
+            self.mass_estimate = max(self.min_mass, self.mass_estimate + k_m * innovation)
+            self.mass_cov = (1.0 - k_m) * self.mass_cov
+        self.params['M'] = self.mass_estimate
+        self.mass_history.append(self.mass_estimate)
 
     def _jacobian_dynamics(self, x, u, dt, eps=1e-5):
         """
@@ -236,6 +265,10 @@ class ExtendedKalmanFilter:
     def get_uncertainty(self):
         """Return standard deviation of state estimates."""
         return np.sqrt(np.diag(self.P))
+
+    def get_mass_estimate(self):
+        """Return current EKF-estimated vehicle mass [kg]."""
+        return float(self.mass_estimate)
     
     def reset(self, initial_state=None):
         """Reset filter to initial state."""
@@ -246,8 +279,10 @@ class ExtendedKalmanFilter:
         self.P = np.eye(self.n_states) * 1.0
         self.vx_prev = 30.0
         self.vy_prev = 0.0
-        
-        self.P = np.eye(self.n_states) * 1.0
+        self.mass_estimate = float(self.params.get('M', self.default_mass))
+        self.mass_cov = 25.0
+        self.params['M'] = self.mass_estimate
+        self.mass_history = []
 
 
 def add_sensor_noise(state, measurement_noise_std):
