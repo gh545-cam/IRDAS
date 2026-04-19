@@ -1,5 +1,7 @@
 import numpy as np
  
+MIN_VEHICLE_MASS_KG = 100.0
+ 
  
 # ─────────────────────────────────────────────
 #  Noise profiles (standard deviations)
@@ -117,6 +119,13 @@ class SensorSimulator:
     def estimate_fuel_flow(self, true_state: np.ndarray, control: np.ndarray) -> float:
         """
         Estimate fuel flow [kg/s] from engine operating point.
+
+        Args:
+            true_state: full vehicle state, using engine rpm at true_state[10]
+            control: control input [steer, throttle, brake], using control[1:3]
+
+        Returns:
+            Estimated instantaneous fuel flow in kg/s.
         """
         rpm = float(np.clip(true_state[10], 1000.0, 15500.0))
         throttle = float(np.clip(control[1], 0.0, 1.0))
@@ -131,13 +140,17 @@ class SensorSimulator:
                             true_mass_kg: float) -> tuple[float, float]:
         """
         Return noisy fuel-flow and mass measurements.
+        This method is the source of truth for the sensor-side mass estimate.
+
+        Returns:
+            Tuple (fuel_flow_measured_kgps, mass_measured_kg).
         """
         fuel_flow_true = self.estimate_fuel_flow(true_state, control)
         fuel_flow_measured = fuel_flow_true + np.random.normal(0, self.noise['fuel_flow'])
         fuel_flow_measured = max(float(fuel_flow_measured), 0.0)
 
         mass_measured = float(true_mass_kg) + np.random.normal(0, self.noise['mass'])
-        self.estimated_mass = max(100.0, mass_measured)
+        self.estimated_mass = max(MIN_VEHICLE_MASS_KG, mass_measured)
         return fuel_flow_measured, self.estimated_mass
  
     def _compute_imu(self, true_state: np.ndarray,

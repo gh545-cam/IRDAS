@@ -47,7 +47,10 @@ except ImportError:
 N_LAPS           = 30
 STEPS_PER_LAP    = 400          # 400 × 0.05s = 20s per lap
 DT               = 0.05
-TRACK_LENGTH_M   = 5200.0       # Representative F1-style lap length
+TRACK_LENGTH_M   = 5200.0       # Representative modern race-track lap length
+MIN_VALID_SPEED_MPS = 0.1
+DYNAMIC_STATE_START = 3
+DYNAMIC_STATE_END = 10
 INITIAL_STATE    = np.array([0., 0., 0., 30., 0., 0.,
                               30., 30., 30., 30., 8000., 4., 0.5])
 
@@ -231,9 +234,12 @@ def run_race_scenario(irdas: IRDAS, n_laps: int = N_LAPS,
                     residual = irdas.nn_learner.predict(dyn_state, u)
                     lap_residuals.append(np.linalg.norm(residual))
 
-                lap_vx.append(max(0.0, float(estimated_state[3])))
+                lap_vx.append(float(estimated_state[3]))
                 lap_model_error.append(float(irdas.history['model_errors'][-1]))
-                lap_ekf_error.append(float(np.linalg.norm(irdas.true_state - estimated_state)))
+                # EKF accuracy metric focused on dynamic states (vx, vy, r, 4 wheel speeds).
+                lap_ekf_error.append(float(np.linalg.norm(
+                    (irdas.true_state - estimated_state)[DYNAMIC_STATE_START:DYNAMIC_STATE_END]
+                )))
             except Exception as e:
                 print(f"  Warning lap {lap+1}, step {step+1}: {e}")
                 continue
@@ -251,7 +257,11 @@ def run_race_scenario(irdas: IRDAS, n_laps: int = N_LAPS,
         nn_residual_magnitude.append(np.mean(lap_residuals) if lap_residuals else 0.0)
         mean_vx = np.mean(lap_vx) if lap_vx else 0.0
         vx_history.append(mean_vx)
-        lap_times.append(TRACK_LENGTH_M / max(mean_vx, 1.0))
+        # Treat near-standstill laps as invalid for lap-time estimation.
+        if mean_vx <= MIN_VALID_SPEED_MPS:
+            lap_times.append(np.nan)
+        else:
+            lap_times.append(TRACK_LENGTH_M / mean_vx)
 
         model_error_rmse.append(float(np.sqrt(np.mean(np.square(lap_model_error)))) if lap_model_error else 0.0)
         ekf_error_rmse.append(float(np.sqrt(np.mean(np.square(lap_ekf_error)))) if lap_ekf_error else 0.0)
@@ -416,10 +426,10 @@ def plot_race_results(results: dict, save_path: str = 'results/race_scenario.png
     # ── Panel 6: Accuracy metrics ─────────────────────────────
     ax = axes[2, 1]
     ax.plot(laps, results['model_error_rmse'], '-^', linewidth=2, markersize=4, label='Model RMSE')
-    ax.plot(laps, results['ekf_error_rmse'], '-v', linewidth=2, markersize=4, label='EKF state RMSE')
+    ax.plot(laps, results['ekf_error_rmse'], '-v', linewidth=2, markersize=4, label='EKF dynamics RMSE')
     ax.set_xlabel('Lap')
     ax.set_ylabel('RMSE')
-    ax.set_title('Model and EKF Accuracy per Lap')
+    ax.set_title('Model and EKF Dynamics Accuracy per Lap')
     ax.grid(True, alpha=0.3)
     ax.legend(fontsize=8)
 
@@ -427,7 +437,7 @@ def plot_race_results(results: dict, save_path: str = 'results/race_scenario.png
     axes[0, 0].twinx().plot(laps, results['temperatures'], ':',
                             color='purple', linewidth=1.2, alpha=0.5)
 
-    plt.tight_layout()
+    plt.tight_layout(rect=[0, 0, 1, 0.98])
     plt.savefig(save_path, dpi=150, bbox_inches='tight')
     print(f"\nPlot saved to {save_path}")
     return fig

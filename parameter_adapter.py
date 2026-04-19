@@ -147,8 +147,8 @@ class OnlineParameterAdapter:
 
     def update_rls(self, slip_angles, slip_ratios, Fz_kN_wheels,
                    lateral_force_error, longitudinal_force_error,
-                   acceleration_error=0.0, speed_error=0.0,
-                   adaptive_factor=0.98, debug=False):
+                   speed_error=0.0, adaptive_factor=0.98, debug=False,
+                   **_deprecated_kwargs):
         """
         Recursive least squares update - simple scalar RLS per parameter.
         
@@ -163,7 +163,6 @@ class OnlineParameterAdapter:
             Fz_kN_wheels:             array [Fz_fl, Fz_fr, Fz_rl, Fz_rr] kN
             lateral_force_error:      scalar lateral force residual (N): true_force - predicted_force
             longitudinal_force_error: scalar longitudinal force residual (N)
-            acceleration_error:       unused (kept for API compatibility)
             speed_error:              scalar speed error (m/s)
             adaptive_factor:          forgetting factor (0.95-0.99)
             debug:                    print debug info
@@ -176,7 +175,7 @@ class OnlineParameterAdapter:
         y = np.array([
             lateral_force_error,       # TYRE_LAT_a2
             longitudinal_force_error,  # TYRE_LON_a2
-            -speed_error,              # Cd
+            -speed_error,              # Cd channel (speed_error = true_vx - model_vx): slower true car => negative speed_error => positive Cd update
             lateral_force_error * 0.1, # Cl
         ])
         

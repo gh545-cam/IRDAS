@@ -6,6 +6,8 @@ import numpy as np
 from scipy import linalg
 from twin_track import twin_track_model
 
+MIN_VEHICLE_MASS_KG = 100.0
+
 
 class ExtendedKalmanFilter:
     """
@@ -34,7 +36,8 @@ class ExtendedKalmanFilter:
         self.vy_prev = 0.0
         # Separate scalar Kalman filter for vehicle mass driven by fuel-flow sensing.
         self.mass_estimate = float(params.get('M', 752.0))
-        self.min_mass = max(100.0, 0.75 * self.mass_estimate)
+        self.default_mass = self.mass_estimate
+        self.min_mass = max(MIN_VEHICLE_MASS_KG, 0.75 * self.mass_estimate)
         self.mass_cov = 25.0
         self.mass_process_noise = 1e-3
         self.mass_measurement_noise = 4.0
@@ -86,7 +89,8 @@ class ExtendedKalmanFilter:
             dt = self.dt
 
         # Predict vehicle mass from fuel flow before propagating dynamics.
-        self.mass_estimate = max(self.min_mass, self.mass_estimate - max(0.0, float(fuel_flow_kgps)) * dt)
+        fuel_consumed = max(0.0, float(fuel_flow_kgps)) * dt
+        self.mass_estimate = max(self.min_mass, self.mass_estimate - fuel_consumed)
         self.mass_cov = self.mass_cov + self.mass_process_noise
         self.params['M'] = self.mass_estimate
         
@@ -275,7 +279,7 @@ class ExtendedKalmanFilter:
         self.P = np.eye(self.n_states) * 1.0
         self.vx_prev = 30.0
         self.vy_prev = 0.0
-        self.mass_estimate = float(self.params.get('M', self.mass_estimate))
+        self.mass_estimate = float(self.params.get('M', self.default_mass))
         self.mass_cov = 25.0
         self.params['M'] = self.mass_estimate
         self.mass_history = []

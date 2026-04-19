@@ -13,6 +13,8 @@ from residual_network import ResidualDynamicsLearner
 from parameter_adapter import OnlineParameterAdapter
 from twin_track import twin_track_model
 from sensors import SensorSimulator
+
+MIN_VEHICLE_MASS_KG = 100.0
 def ornstein_uhlenbeck(prev, mu=0.0, theta=0.15, sigma=0.1, dt=0.05):
     """
     Temporally correlated random process.
@@ -364,7 +366,8 @@ class IRDAS:
         true_state_before = self.true_state.copy()          # snapshot BEFORE step
         # Fuel-flow sensor drives mass depletion; this mass is treated as measured (not RLS-estimated).
         fuel_flow_true = self.sensor_sim.estimate_fuel_flow(true_state_before, control)
-        self.true_vehicle_mass = max(100.0, self.true_vehicle_mass - fuel_flow_true * self.dt)
+        fuel_consumed = fuel_flow_true * self.dt
+        self.true_vehicle_mass = max(MIN_VEHICLE_MASS_KG, self.true_vehicle_mass - fuel_consumed)
         if self.real_simulator is not None:
             self.real_simulator.true_params['M'] = self.true_vehicle_mass
         true_state_next = self.real_simulator.step(self.true_state, control, self.dt)
