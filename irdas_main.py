@@ -342,6 +342,7 @@ class IRDAS:
             measurement_noise_std: dict with sensor noise std devs
             use_nn_correction: whether to use NN for residual correction (7-state only)
             use_param_adaptation: whether to adapt parameters
+            reset_nn_memory: if True, resets recurrent residual-memory state before this step
             
         Returns:
             estimated_state: Kalman filter estimated full 13-state
@@ -597,6 +598,10 @@ class IRDAS:
         """
         Domain helper for pit-stop tire change events.
         Resets recurrent NN memory and optionally resets online parameter adaptation.
+
+        Args:
+            reset_parameter_adapter: when True, also resets RLS parameter adaptation
+                                     to baseline to reflect fresh-tire conditions.
         """
         self.reset_residual_memory()
         if reset_parameter_adapter and self.use_rls and hasattr(self, 'param_adapter'):

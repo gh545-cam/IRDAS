@@ -100,12 +100,25 @@ class ResidualDynamicsLearner:
       - sequence training
       - stateful inference
       - PINN-inspired regularizers (traction-circle and steering symmetry)
+
+    Args:
+        state_dim: reduced dynamics-state dimension (default 7)
+        control_dim: control dimension (default 3)
+        learning_rate: optimizer learning rate
+        l2_reg: Adam weight decay
+        device: torch device string
+        sequence_length: sequence window length used for recurrent training
+        pinn_traction_weight: weight of traction-circle regularizer
+        pinn_symmetry_weight: weight of steering-symmetry regularizer
+        max_residual_accel: soft cap (m/s^2) for residual acceleration magnitude
+        model_dt: discretization step used to convert residual velocity increments
+                  into residual accelerations in traction regularization
     """
 
     def __init__(self, state_dim=7, control_dim=3, learning_rate=1e-3,
                  l2_reg=1e-4, device='cpu', sequence_length=20,
                  pinn_traction_weight=0.05, pinn_symmetry_weight=0.05,
-                 max_residual_accel=18.0):
+                 max_residual_accel=18.0, model_dt=0.05):
         self.device = device
         self.state_dim = state_dim
         self.control_dim = control_dim
@@ -133,6 +146,7 @@ class ResidualDynamicsLearner:
         self.pinn_traction_weight = float(pinn_traction_weight)
         self.pinn_symmetry_weight = float(pinn_symmetry_weight)
         self.max_residual_accel = float(max_residual_accel)
+        self.model_dt = float(model_dt)
 
         self._stateful_hidden = None
 
@@ -142,7 +156,9 @@ class ResidualDynamicsLearner:
     def _build_sequence_dataset(self, states, controls, residuals, seq_len):
         n = len(states)
         if n < seq_len:
-            seq_len = n
+            raise ValueError(
+                f"Insufficient samples for sequence dataset: got {n}, need at least {seq_len}."
+            )
         Xs, Xu, Yr = [], [], []
         for i in range(n - seq_len + 1):
             Xs.append(states[i:i + seq_len])
@@ -178,8 +194,9 @@ class ResidualDynamicsLearner:
 
     def _traction_circle_regularizer(self, pred_residual):
         # Approximate residual accelerations from predicted residual velocity increments.
-        # Uses dt=0.05 from IRDAS runtime/training generation.
-        dt = 0.05
+        # Uses configured model_dt to stay consistent with runtime discretization.
+        # residual_v / dt approximates residual acceleration magnitude.
+        dt = self.model_dt
         ax_res = pred_residual[..., 0] / dt
         ay_res = pred_residual[..., 1] / dt
         mag = torch.sqrt(ax_res * ax_res + ay_res * ay_res + 1e-8)
@@ -220,7 +237,12 @@ class ResidualDynamicsLearner:
             total_loss += loss.item()
             num_batches += 1
 
-        return total_loss / max(1, num_batches)
+        if num_batches == 0:
+            raise ValueError(
+                f"Empty training loader: no sequence batches were generated. "
+                f"Check that training data has at least {self.sequence_length} samples."
+            )
+        return total_loss / num_batches
 
     def validate(self, val_loader):
         self.network.eval()
@@ -242,7 +264,12 @@ class ResidualDynamicsLearner:
                 total_loss += loss.item()
                 num_batches += 1
 
-        return total_loss / max(1, num_batches)
+        if num_batches == 0:
+            raise ValueError(
+                f"Empty validation loader: no sequence batches were generated. "
+                f"Check that validation data has at least {self.sequence_length} samples."
+            )
+        return total_loss / num_batches
 
     def fit(self, train_states, train_controls, train_residuals,
             val_states=None, val_controls=None, val_residuals=None,
@@ -324,11 +351,11 @@ class ResidualDynamicsLearner:
         single_sample = False
         if states.ndim == 1:
             single_sample = True
-            states = states[np.newaxis, np.newaxis, :]   # [1,1,7]
-            controls = controls[np.newaxis, np.newaxis, :]  # [1,1,3]
+            states = states[np.newaxis, np.newaxis, :]   # [1,1,state_dim]
+            controls = controls[np.newaxis, np.newaxis, :]  # [1,1,control_dim]
         elif states.ndim == 2:
-            states = states[:, np.newaxis, :]  # [N,1,7]
-            controls = controls[:, np.newaxis, :]  # [N,1,3]
+            states = states[:, np.newaxis, :]  # [N,1,state_dim]
+            controls = controls[:, np.newaxis, :]  # [N,1,control_dim]
 
         states_norm = self.state_normalizer.normalize(states)
         controls_norm = self.control_normalizer.normalize(controls)
@@ -364,6 +391,7 @@ class ResidualDynamicsLearner:
             'pinn_traction_weight': self.pinn_traction_weight,
             'pinn_symmetry_weight': self.pinn_symmetry_weight,
             'max_residual_accel': self.max_residual_accel,
+            'model_dt': self.model_dt,
         }
         torch.save(checkpoint, path)
 
@@ -379,6 +407,7 @@ class ResidualDynamicsLearner:
         self.pinn_traction_weight = checkpoint.get('pinn_traction_weight', self.pinn_traction_weight)
         self.pinn_symmetry_weight = checkpoint.get('pinn_symmetry_weight', self.pinn_symmetry_weight)
         self.max_residual_accel = checkpoint.get('max_residual_accel', self.max_residual_accel)
+        self.model_dt = checkpoint.get('model_dt', self.model_dt)
         self.reset_stateful_inference()
 
 

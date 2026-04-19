@@ -17,6 +17,8 @@ class ExtendedKalmanFilter:
     Sensor measurements (9 elements):
         [x_gps, y_gps, ax, ay, r, vx_gps, vy_gps, engine_rpm, wheel_speeds (avg)]
     """
+    PSI_INDEX = 2
+    SIGMA_CONDITION_THRESHOLD = 1e12
 
     def __init__(self, params, process_noise=None, measurement_noise=None,
                  alpha=1e-2, beta=2.0, kappa=0.0):
@@ -78,7 +80,7 @@ class ExtendedKalmanFilter:
     def _state_postprocess(self, x):
         x = x.copy()
         x[0:2] = np.clip(x[0:2], -1e4, 1e4)
-        x[2] = np.arctan2(np.sin(x[2]), np.cos(x[2]))
+        x[self.PSI_INDEX] = np.arctan2(np.sin(x[self.PSI_INDEX]), np.cos(x[self.PSI_INDEX]))
         x[3:6] = np.clip(x[3:6], -50, 50)
         x[6:10] = np.clip(x[6:10], 0, 100)
         x[10] = np.clip(x[10], 1000, 15500)
@@ -90,8 +92,12 @@ class ExtendedKalmanFilter:
         n = self.n_states
         c = n + self.lambda_
 
+        # Defensive symmetrization: repeated covariance updates can introduce tiny
+        # floating-point asymmetry, which can break Cholesky decomposition.
         cov = 0.5 * (cov + cov.T)
         jitter = 1e-9
+        # Retry a few times with increasing diagonal jitter up to ~1e-5 to recover
+        # near-PSD matrices caused by numerical noise.
         for _ in range(5):
             try:
                 sqrt_cov = linalg.cholesky(c * (cov + np.eye(n) * jitter), lower=True)
@@ -114,9 +120,9 @@ class ExtendedKalmanFilter:
         mean = np.tensordot(self.Wm, sigma_points, axes=(0, 0))
 
         # Proper circular averaging for yaw angle psi
-        sin_psi = np.tensordot(self.Wm, np.sin(sigma_points[:, 2]), axes=(0, 0))
-        cos_psi = np.tensordot(self.Wm, np.cos(sigma_points[:, 2]), axes=(0, 0))
-        mean[2] = np.arctan2(sin_psi, cos_psi)
+        sin_psi = np.tensordot(self.Wm, np.sin(sigma_points[:, self.PSI_INDEX]), axes=(0, 0))
+        cos_psi = np.tensordot(self.Wm, np.cos(sigma_points[:, self.PSI_INDEX]), axes=(0, 0))
+        mean[self.PSI_INDEX] = np.arctan2(sin_psi, cos_psi)
         return mean
 
     def _cov_from_sigma(self, sigma_points, mean, noise=None):
@@ -125,7 +131,7 @@ class ExtendedKalmanFilter:
 
         for i in range(sigma_points.shape[0]):
             d = sigma_points[i] - mean
-            d[2] = np.arctan2(np.sin(d[2]), np.cos(d[2]))
+            d[self.PSI_INDEX] = np.arctan2(np.sin(d[self.PSI_INDEX]), np.cos(d[self.PSI_INDEX]))
             cov += self.Wc[i] * np.outer(d, d)
 
         if noise is not None:
@@ -169,7 +175,7 @@ class ExtendedKalmanFilter:
 
         for i in range(self._sigma_points.shape[0]):
             dx = self._sigma_points[i] - self.x
-            dx[2] = np.arctan2(np.sin(dx[2]), np.cos(dx[2]))
+            dx[self.PSI_INDEX] = np.arctan2(np.sin(dx[self.PSI_INDEX]), np.cos(dx[self.PSI_INDEX]))
             dz = sigma_meas[i] - z_pred
             S += self.Wc[i] * np.outer(dz, dz)
             Pxz += self.Wc[i] * np.outer(dx, dz)
@@ -178,7 +184,8 @@ class ExtendedKalmanFilter:
         S = 0.5 * (S + S.T)
 
         try:
-            if np.linalg.cond(S) > 1e12:
+            # Use pseudoinverse for very ill-conditioned innovation covariance.
+            if np.linalg.cond(S) > self.SIGMA_CONDITION_THRESHOLD:
                 K = Pxz @ np.linalg.pinv(S)
             else:
                 K = linalg.solve(S.T, Pxz.T, assume_a='sym').T
@@ -295,3 +302,4 @@ if __name__ == "__main__":
 
     ukf.update(z)
     print(f"After update: vx={ukf.x[3]:.3f}, uncertainty={ukf.get_uncertainty()[3]:.4f}")
+    PSI_INDEX = 2
