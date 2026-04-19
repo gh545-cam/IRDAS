@@ -520,9 +520,6 @@ class IRDAS:
                 self.kalman_filter.baseline_params = self.current_params
         
         # Step 8: Log history
-        self.history.setdefault('fuel_flow_measured', [])
-        self.history.setdefault('true_vehicle_mass', [])
-        self.history.setdefault('estimated_vehicle_mass', [])
         self.history['true_states'].append(true_state_next.copy())
         self.history['estimated_states'].append(estimated_state.copy())
         self.history['measured_states'].append(measurement.copy())
