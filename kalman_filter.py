@@ -6,6 +6,8 @@ import numpy as np
 from scipy import linalg
 from twin_track import twin_track_model
 
+MIN_VEHICLE_MASS_KG = 100.0
+
 
 class ExtendedKalmanFilter:
     """
@@ -34,6 +36,15 @@ class ExtendedKalmanFilter:
 
         self.vx_prev = 30.0
         self.vy_prev = 0.0
+
+        # Scalar Kalman state for vehicle mass driven by fuel-flow and mass sensing.
+        self.mass_estimate = float(params.get('M', 752.0))
+        self.default_mass = self.mass_estimate
+        self.min_mass = max(MIN_VEHICLE_MASS_KG, 0.75 * self.mass_estimate)
+        self.mass_cov = 25.0
+        self.mass_process_noise = 1e-3
+        self.mass_measurement_noise = 4.0
+        self.mass_history = []
 
         self.x = np.array([0., 0., 0., 30., 0., 0., 30., 30., 30., 30., 8000., 4., 0.5], dtype=np.float64)
         self.P = np.eye(self.n_states, dtype=np.float64) * 1.0
@@ -140,9 +151,15 @@ class ExtendedKalmanFilter:
         cov = 0.5 * (cov + cov.T)
         return cov
 
-    def predict(self, u, dt=None):
+    def predict(self, u, dt=None, fuel_flow_kgps=0.0):
         if dt is None:
             dt = self.dt
+
+        # Fuel-flow prediction for mass state.
+        fuel_consumed = max(0.0, float(fuel_flow_kgps)) * dt
+        self.mass_estimate = max(self.min_mass, self.mass_estimate - fuel_consumed)
+        self.mass_cov = self.mass_cov + self.mass_process_noise
+        self.params['M'] = self.mass_estimate
 
         sigma = self._generate_sigma_points(self.x, self.P)
 
@@ -160,7 +177,7 @@ class ExtendedKalmanFilter:
         self.vx_prev = self.x[3]
         self.vy_prev = self.x[4]
 
-    def update(self, z):
+    def update(self, z, mass_sensor_kg=None):
         if self._sigma_points is None:
             self._sigma_points = self._generate_sigma_points(self.x, self.P)
 
@@ -203,6 +220,17 @@ class ExtendedKalmanFilter:
         self.P[11, :] = 0.0
         self.P[:, 11] = 0.0
 
+        # Scalar mass update from direct mass measurement.
+        if mass_sensor_kg is not None:
+            z_m = float(mass_sensor_kg)
+            innovation_m = z_m - self.mass_estimate
+            s_m = self.mass_cov + self.mass_measurement_noise
+            k_m = self.mass_cov / (s_m + 1e-12)
+            self.mass_estimate = max(self.min_mass, self.mass_estimate + k_m * innovation_m)
+            self.mass_cov = (1.0 - k_m) * self.mass_cov
+        self.params['M'] = self.mass_estimate
+        self.mass_history.append(self.mass_estimate)
+
     def _measurement_function(self, x):
         from sensors import measurement_function_fixed
         return measurement_function_fixed(x, self.vx_prev, self.vy_prev, self.dt)
@@ -216,6 +244,9 @@ class ExtendedKalmanFilter:
     def get_uncertainty(self):
         return np.sqrt(np.clip(np.diag(self.P), 0.0, None))
 
+    def get_mass_estimate(self):
+        return float(self.mass_estimate)
+
     def reset(self, initial_state=None):
         if initial_state is not None:
             self.x = np.asarray(initial_state, dtype=np.float64).copy()
@@ -227,6 +258,10 @@ class ExtendedKalmanFilter:
         self.vx_prev = float(self.x[3])
         self.vy_prev = float(self.x[4])
         self._sigma_points = None
+        self.mass_estimate = float(self.params.get('M', self.default_mass))
+        self.mass_cov = 25.0
+        self.params['M'] = self.mass_estimate
+        self.mass_history = []
 
 
 # Explicit alias for users who want UKF naming
@@ -302,4 +337,3 @@ if __name__ == "__main__":
 
     ukf.update(z)
     print(f"After update: vx={ukf.x[3]:.3f}, uncertainty={ukf.get_uncertainty()[3]:.4f}")
-    PSI_INDEX = 2
