@@ -13,20 +13,21 @@ class ExtendedKalmanFilter:
     """
     Backward-compatible UKF implementation (class name retained).
 
-    State vector (13 elements):
-        [x, y, psi, vx, vy, r, vw_fl, vw_fr, vw_rl, vw_rr, engine_rpm, gear, throttle]
+    State vector (14 elements):
+        [x, y, psi, vx, vy, r, vw_fl, vw_fr, vw_rl, vw_rr, engine_rpm, gear, throttle, mass]
 
-    Sensor measurements (9 elements):
-        [x_gps, y_gps, ax, ay, r, vx_gps, vy_gps, engine_rpm, wheel_speeds (avg)]
+    Sensor measurements (10 elements):
+        [x_gps, y_gps, ax, ay, r, vx_gps, vy_gps, engine_rpm, wheel_speeds (avg), mass_sensor]
     """
     PSI_INDEX = 2
+    MASS_INDEX = 13
     SIGMA_CONDITION_THRESHOLD = 1e12
 
     def __init__(self, params, process_noise=None, measurement_noise=None,
                  alpha=1e-2, beta=2.0, kappa=0.0):
         self.params = params
-        self.n_states = 13
-        self.n_measurements = 9
+        self.n_states = 14
+        self.n_measurements = 10
 
         # UKF scaling parameters
         self.alpha = alpha
@@ -46,8 +47,15 @@ class ExtendedKalmanFilter:
         self.mass_measurement_noise = 4.0
         self.mass_history = []
 
-        self.x = np.array([0., 0., 0., 30., 0., 0., 30., 30., 30., 30., 8000., 4., 0.5], dtype=np.float64)
+        self.x = np.array([0., 0., 0., 30., 0., 0., 30., 30., 30., 30., 8000., 4., 0.5,
+                   self.mass_estimate], dtype=np.float64)
         self.P = np.eye(self.n_states, dtype=np.float64) * 1.0
+        self.P[self.MASS_INDEX, self.MASS_INDEX] = self.mass_cov
+        # Discrete/control states should not diffuse through continuous covariance.
+        self.P[11, :] = 0.0
+        self.P[:, 11] = 0.0
+        self.P[12, :] = 0.0
+        self.P[:, 12] = 0.0
 
         if process_noise is None:
             self.Q = np.diag([
@@ -55,7 +63,8 @@ class ExtendedKalmanFilter:
                 0.01,
                 0.1, 0.1, 0.01,
                 0.5, 0.5, 0.5, 0.5,
-                10.0, 0.0, 0.01
+                10.0, 0.0, 0.01,
+                self.mass_process_noise
             ]).astype(np.float64)
         else:
             self.Q = process_noise.astype(np.float64)
@@ -67,7 +76,8 @@ class ExtendedKalmanFilter:
                 0.01,
                 0.1, 0.1,
                 50.0,
-                0.2
+                0.2,
+                self.mass_measurement_noise
             ]).astype(np.float64)
         else:
             self.R = measurement_noise.astype(np.float64)
@@ -92,11 +102,14 @@ class ExtendedKalmanFilter:
         x = x.copy()
         x[0:2] = np.clip(x[0:2], -1e4, 1e4)
         x[self.PSI_INDEX] = np.arctan2(np.sin(x[self.PSI_INDEX]), np.cos(x[self.PSI_INDEX]))
-        x[3:6] = np.clip(x[3:6], -50, 50)
+        x[3] = np.clip(x[3], -10, 95)
+        x[4] = np.clip(x[4], -35, 35)
+        x[5] = np.clip(x[5], -4, 4)
         x[6:10] = np.clip(x[6:10], 0, 100)
         x[10] = np.clip(x[10], 1000, 15500)
         x[11] = int(np.clip(round(x[11]), 1, 8))
         x[12] = np.clip(x[12], 0, 1)
+        x[self.MASS_INDEX] = np.clip(x[self.MASS_INDEX], self.min_mass, self.default_mass * 1.5)
         return x
 
     def _generate_sigma_points(self, mean, cov):
@@ -155,17 +168,21 @@ class ExtendedKalmanFilter:
         if dt is None:
             dt = self.dt
 
-        # Fuel-flow prediction for mass state.
         fuel_consumed = max(0.0, float(fuel_flow_kgps)) * dt
-        self.mass_estimate = max(self.min_mass, self.mass_estimate - fuel_consumed)
-        self.mass_cov = self.mass_cov + self.mass_process_noise
-        self.params['M'] = self.mass_estimate
 
         sigma = self._generate_sigma_points(self.x, self.P)
 
         propagated = np.zeros_like(sigma)
         for i in range(sigma.shape[0]):
-            propagated[i] = self._state_postprocess(twin_track_model(sigma[i], u, dt, self.params))
+            sigma_i = sigma[i].copy()
+            mass_i = float(np.clip(sigma_i[self.MASS_INDEX], self.min_mass, self.default_mass * 1.5))
+            params_i = self.params.copy()
+            params_i['M'] = mass_i
+
+            dyn_next = twin_track_model(sigma_i[:13], u, dt, params_i)
+            propagated[i, :13] = dyn_next
+            propagated[i, self.MASS_INDEX] = max(self.min_mass, mass_i - fuel_consumed)
+            propagated[i] = self._state_postprocess(propagated[i])
 
         x_pred = self._mean_from_sigma(propagated)
         P_pred = self._cov_from_sigma(propagated, x_pred, noise=self.Q)
@@ -174,12 +191,30 @@ class ExtendedKalmanFilter:
         self.P = P_pred
         self._sigma_points = propagated
 
+        self.mass_estimate = float(self.x[self.MASS_INDEX])
+        self.mass_cov = float(max(self.P[self.MASS_INDEX, self.MASS_INDEX], 0.0))
+        self.params['M'] = self.mass_estimate
+
         self.vx_prev = self.x[3]
         self.vy_prev = self.x[4]
 
     def update(self, z, mass_sensor_kg=None):
+        z = np.asarray(z, dtype=np.float64).reshape(-1)
+        if z.shape[0] == 9:
+            if mass_sensor_kg is None:
+                z = np.concatenate([z, np.array([self.mass_estimate], dtype=np.float64)])
+            else:
+                z = np.concatenate([z, np.array([float(mass_sensor_kg)], dtype=np.float64)])
+        elif z.shape[0] == 10:
+            pass
+        else:
+            raise ValueError(f"Expected 9 or 10 measurement elements, got {z.shape[0]}")
+
         if self._sigma_points is None:
             self._sigma_points = self._generate_sigma_points(self.x, self.P)
+
+        # Keep predicted discrete/control states unchanged through measurement update.
+        x_prior = self.x.copy()
 
         sigma_meas = np.zeros((self._sigma_points.shape[0], self.n_measurements), dtype=np.float64)
         for i in range(self._sigma_points.shape[0]):
@@ -212,22 +247,20 @@ class ExtendedKalmanFilter:
         innovation = z - z_pred
         self.x = self.x + K @ innovation
         self.x = self._state_postprocess(self.x)
+        self.x[11] = x_prior[11]
+        self.x[12] = x_prior[12]
 
         self.P = self.P - K @ S @ K.T
         self.P = 0.5 * (self.P + self.P.T)
 
-        # Keep gear uncertainty collapsed (discrete state)
+        # Keep discrete/control-state uncertainty collapsed.
         self.P[11, :] = 0.0
         self.P[:, 11] = 0.0
+        self.P[12, :] = 0.0
+        self.P[:, 12] = 0.0
 
-        # Scalar mass update from direct mass measurement.
-        if mass_sensor_kg is not None:
-            z_m = float(mass_sensor_kg)
-            innovation_m = z_m - self.mass_estimate
-            s_m = self.mass_cov + self.mass_measurement_noise
-            k_m = self.mass_cov / (s_m + 1e-12)
-            self.mass_estimate = max(self.min_mass, self.mass_estimate + k_m * innovation_m)
-            self.mass_cov = (1.0 - k_m) * self.mass_cov
+        self.mass_estimate = float(self.x[self.MASS_INDEX])
+        self.mass_cov = float(max(self.P[self.MASS_INDEX, self.MASS_INDEX], 0.0))
         self.params['M'] = self.mass_estimate
         self.mass_history.append(self.mass_estimate)
 
@@ -236,6 +269,11 @@ class ExtendedKalmanFilter:
         return measurement_function_fixed(x, self.vx_prev, self.vy_prev, self.dt)
 
     def get_state(self):
+        # Backward-compatible view used by existing IRDAS logic.
+        return self.x[:13].copy()
+
+    def get_augmented_state(self):
+        """Return full augmented state including mass."""
         return self.x.copy()
 
     def get_covariance(self):
@@ -249,17 +287,30 @@ class ExtendedKalmanFilter:
 
     def reset(self, initial_state=None):
         if initial_state is not None:
-            self.x = np.asarray(initial_state, dtype=np.float64).copy()
+            init = np.asarray(initial_state, dtype=np.float64).copy()
+            if init.shape[0] == 13:
+                self.x = np.concatenate([init, np.array([float(self.params.get('M', self.default_mass))], dtype=np.float64)])
+            elif init.shape[0] == 14:
+                self.x = init
+            else:
+                raise ValueError(f"Expected initial_state length 13 or 14, got {init.shape[0]}")
         else:
-            self.x = np.array([0., 0., 0., 30., 0., 0., 30., 30., 30., 30., 8000., 4., 0.5], dtype=np.float64)
+            self.x = np.array([0., 0., 0., 30., 0., 0., 30., 30., 30., 30., 8000., 4., 0.5,
+                               float(self.params.get('M', self.default_mass))], dtype=np.float64)
 
         self.x = self._state_postprocess(self.x)
         self.P = np.eye(self.n_states, dtype=np.float64) * 1.0
+        self.P[self.MASS_INDEX, self.MASS_INDEX] = self.mass_cov
+        self.P[11, :] = 0.0
+        self.P[:, 11] = 0.0
+        self.P[12, :] = 0.0
+        self.P[:, 12] = 0.0
         self.vx_prev = float(self.x[3])
         self.vy_prev = float(self.x[4])
         self._sigma_points = None
-        self.mass_estimate = float(self.params.get('M', self.default_mass))
+        self.mass_estimate = float(self.x[self.MASS_INDEX])
         self.mass_cov = 25.0
+        self.P[self.MASS_INDEX, self.MASS_INDEX] = self.mass_cov
         self.params['M'] = self.mass_estimate
         self.mass_history = []
 

@@ -13,6 +13,17 @@ from irdas_main import IRDAS
 from params import *
 
 
+def _create_baseline_params():
+    return {
+        'L': L, 'TF': TF, 'TR': TR, 'H': H, 'MX': MX, 'M': M,
+        'Cd': Cd, 'Cl': Cl, 'Area': Area, 'CX': CX,
+        'K': K, 'final_drive': final_drive, 'tyre_radius': tyre_radius,
+        'TYRE_LAT': TYRE_LAT.copy(), 'TYRE_LON': TYRE_LON.copy(),
+        'GEAR_RATIOS': GEAR_RATIOS.copy(), 'UPSHIFT_SPEED_KPH': UPSHIFT_SPEED_KPH.copy(),
+        'ENGINE_RPM': ENGINE_RPM.copy(), 'ENGINE_TORQUE_NM': ENGINE_TORQUE_NM.copy()
+    }
+
+
 def test_state_reconstruction():
     """Test that full state reconstruction works correctly."""
     
@@ -22,7 +33,7 @@ def test_state_reconstruction():
     
     # Initialize IRDAS
     print("\n1. Initializing IRDAS system...")
-    irdas = IRDAS(baseline_params=params, use_nn=True, use_rls=True)
+    irdas = IRDAS(baseline_params=_create_baseline_params(), use_nn=True, use_rls=True)
     irdas.initialize_real_vehicle(seed=42)
     
     # Print state structure
@@ -177,7 +188,7 @@ def test_full_simulation_reconstruction():
     
     # Initialize IRDAS
     print("\nInitializing IRDAS for simulation test...")
-    irdas = IRDAS(baseline_params=params, use_nn=True, use_rls=True)
+    irdas = IRDAS(baseline_params=_create_baseline_params(), use_nn=True, use_rls=True)
     irdas.initialize_real_vehicle(seed=42)
     
     # Train NN

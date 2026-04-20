@@ -156,7 +156,8 @@ class IRDAS:
 
 
 
-    def pretrain_neural_network(self, n_training_samples=5000, epochs=100, batch_size=32):
+    def pretrain_neural_network(self, n_training_samples=5000, epochs=100, batch_size=32,
+                                early_stopping_patience=20, min_epochs_before_stopping=0):
         """
         Pretrain neural network on generated data from simulator.
         Uses reduced 7-state space for dynamics-relevant learning.
@@ -239,7 +240,11 @@ class IRDAS:
         self.nn_learner.fit(
             train_states, train_controls, train_residuals,
             val_states, val_controls, val_residuals,
-            epochs=epochs, batch_size=batch_size, verbose=True
+            epochs=epochs,
+            batch_size=batch_size,
+            verbose=True,
+            early_stopping_patience=early_stopping_patience,
+            min_epochs_before_stopping=min_epochs_before_stopping,
         )
         
         self.nn_trained = True
@@ -300,7 +305,7 @@ class IRDAS:
         mean_wheel_speed = np.mean(corrected_wheel_speeds)
         
         # Get gear ratio for current gear
-        current_gear = int(corrected_state[11])
+        current_gear = int(round(corrected_state[11]))
         current_gear = np.clip(current_gear, 1, 8)  # Ensure valid gear (1-8)
         
         # Get parameters
@@ -316,7 +321,7 @@ class IRDAS:
         if current_gear in gear_ratios:
             gear_ratio = gear_ratios[current_gear]
             corrected_rpm = mean_wheel_speed * gear_ratio * final_drive * 60.0 / (2 * np.pi * 0.33)
-            corrected_rpm = np.clip(corrected_rpm, 0, 15500)  # Clamp to valid RPM range
+            corrected_rpm = np.clip(corrected_rpm, 1000, 15500)  # Clamp to model-consistent RPM range
             corrected_state[10] = corrected_rpm
         
         # UNCHANGED STATES (explained above):
@@ -358,13 +363,7 @@ class IRDAS:
         if reset_nn_memory and self.use_nn and hasattr(self, 'nn_learner'):
             self.nn_learner.reset_stateful_inference()
 
-        step_num = len(self.history['true_states'])
-        if step_num < 3:
-            print(f"\n--- Step {step_num} RAW ---")
-            print(f"Control input:     {control}")
-            print(f"State going IN:    vx={self.kalman_filter.x[3]:.3f}, gear={self.kalman_filter.x[11]:.0f}, rpm={self.kalman_filter.x[10]:.0f}")
-            print(f"True state going IN: {self.real_simulator.get_state_history()[-1][3] if self.real_simulator.state_history else 'EMPTY'}")
-        # Default measurement noise
+      
         if measurement_noise_std is None:
             measurement_noise_std = {
                 'x_gps': 1.0, 'y_gps': 1.0,  # GPS position (meters)
@@ -389,6 +388,7 @@ class IRDAS:
         fuel_flow_measured, mass_sensor_kg = self.sensor_sim.measure_fuel_system(
             true_state_next, control, self.true_vehicle_mass
         )
+        measurement_aug = np.concatenate([measurement, np.array([mass_sensor_kg], dtype=np.float64)])
         
         # Step 3: Kalman filter prediction (baseline model)
         self.kalman_filter.predict(control, self.dt, fuel_flow_kgps=fuel_flow_measured)
@@ -406,7 +406,7 @@ class IRDAS:
             self.kalman_filter.x = corrected_full_state
         
         # Step 5: Kalman filter update
-        self.kalman_filter.update(measurement, mass_sensor_kg=mass_sensor_kg)
+        self.kalman_filter.update(measurement_aug)
         estimated_state = self.kalman_filter.get_state()
         
         # Step 6: Compute residual for parameter adaptation
@@ -522,7 +522,7 @@ class IRDAS:
         # Step 8: Log history
         self.history['true_states'].append(true_state_next.copy())
         self.history['estimated_states'].append(estimated_state.copy())
-        self.history['measured_states'].append(measurement.copy())
+        self.history['measured_states'].append(measurement_aug.copy())
         self.history['fuel_flow_measured'].append(float(fuel_flow_measured))
         self.history['true_vehicle_mass'].append(float(self.true_vehicle_mass))
         self.history['estimated_vehicle_mass'].append(float(self.kalman_filter.get_mass_estimate()))
@@ -645,7 +645,6 @@ class IRDAS:
             self.nn_learner.reset_stateful_inference()
         self.history = {k: [] for k in self.history}  # clear history
         self.time_step = 0.0
-        self.nn_trained = True if (self.use_nn and hasattr(self, 'nn_learner')) else False
         self.nn_trained = True if (self.use_nn and hasattr(self, 'nn_learner')) else False  # ADD THIS
 
 

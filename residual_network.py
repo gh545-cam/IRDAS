@@ -273,7 +273,8 @@ class ResidualDynamicsLearner:
 
     def fit(self, train_states, train_controls, train_residuals,
             val_states=None, val_controls=None, val_residuals=None,
-            epochs=100, batch_size=32, verbose=True, sequence_length=None):
+            epochs=100, batch_size=32, verbose=True, sequence_length=None,
+            early_stopping_patience=20, min_epochs_before_stopping=0):
         seq_len = self.sequence_length if sequence_length is None else max(2, int(sequence_length))
 
         self.state_normalizer.fit(train_states)
@@ -314,7 +315,8 @@ class ResidualDynamicsLearner:
 
         best_val_loss = float('inf')
         patience_counter = 0
-        patience = 20
+        patience = max(1, int(early_stopping_patience))
+        min_epochs = max(0, int(min_epochs_before_stopping))
 
         for epoch in range(epochs):
             train_loss = self.train_epoch(train_loader)
@@ -340,7 +342,7 @@ class ResidualDynamicsLearner:
                     patience_counter = 0
                 else:
                     patience_counter += 1
-                    if patience_counter >= patience:
+                    if (epoch + 1) >= min_epochs and patience_counter >= patience:
                         if verbose:
                             print(f"Early stopping at epoch {epoch}")
                         break

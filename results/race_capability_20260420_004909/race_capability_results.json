@@ -1,0 +1,133 @@
+{
+  "suite": "race_capability_test",
+  "timestamp": "20260420_004909",
+  "quick": true,
+  "results": [
+    {
+      "config": {
+        "name": "baseline_robust",
+        "description": "Nominal noise with mild mismatch and one tyre change",
+        "n_laps": 2,
+        "steps_per_lap": 60,
+        "dt": 0.05,
+        "mismatch_scale": 1.0,
+        "base_noise_scale": 1.0,
+        "shock_noise_lap": null,
+        "shock_noise_scale": 1.0,
+        "tyre_change_laps": [
+          2
+        ],
+        "expected_mean_speed_mps": 38.0
+      },
+      "summary": {
+        "scenario": "baseline_robust",
+        "description": "Nominal noise with mild mismatch and one tyre change",
+        "completion_rate": 0.5,
+        "mean_avg_vx_true": 37.78147400938964,
+        "mean_p05_vx_true": 33.81448035098262,
+        "mean_rmse_vx": 4.2135518304042705,
+        "mean_rmse_vy": 1.92336379639647,
+        "mean_rmse_r": 0.1957525530474305,
+        "mean_mass_rmse": 0.4200613501480249,
+        "mean_model_error_rms": 0.018378385068896108,
+        "mean_progress_ratio": 0.9942493160365696,
+        "mean_low_speed_frac": 0.0,
+        "mean_throttle": 0.7514548970892513,
+        "mean_brake": 0.0658229729061626,
+        "mean_recovery_events": 0.0,
+        "mean_abs_lat_a2_err": 0.0010546417877195235,
+        "mean_abs_lon_a2_err": 0.0100110731966363
+      },
+      "metrics": {
+        "lap": [
+          1,
+          2
+        ],
+        "noise_scale": [
+          1.0,
+          1.0
+        ],
+        "tyre_health": [
+          0.9991455662799442,
+          0.9991247627983864
+        ],
+        "avg_vx_true": [
+          33.81626821808585,
+          41.74667980069343
+        ],
+        "p05_vx_true": [
+          29.25630843173501,
+          38.372652270230226
+        ],
+        "rmse_vx": [
+          3.124376232231863,
+          5.302727428576678
+        ],
+        "rmse_vy": [
+          0.6809454052328401,
+          3.1657821875601
+        ],
+        "rmse_r": [
+          0.06233671394240178,
+          0.32916839215245924
+        ],
+        "mass_rmse": [
+          0.7598591046487547,
+          0.08026359564729513
+        ],
+        "model_error_rms": [
+          0.01818153467311092,
+          0.018575235464681292
+        ],
+        "lat_a2_true": [
+          1.9881262108804871,
+          1.98811710998141
+        ],
+        "lat_a2_est": [
+          1.9898735235235454,
+          1.9884790809137907
+        ],
+        "lon_a2_true": [
+          2.0471151203308007,
+          2.047105749402533
+        ],
+        "lon_a2_est": [
+          2.0663637098543246,
+          2.0478793062722818
+        ],
+        "lap_progress_m": [
+          101.44880465425759,
+          125.24003940208028
+        ],
+        "lap_progress_ratio": [
+          0.8899017952127859,
+          1.0985968368603534
+        ],
+        "lap_complete": [
+          false,
+          true
+        ],
+        "low_speed_frac": [
+          0.0,
+          0.0
+        ],
+        "mean_throttle": [
+          0.7893738893699029,
+          0.7135359048085996
+        ],
+        "mean_brake": [
+          0.04843131824895329,
+          0.08321462756337192
+        ],
+        "recovery_events": [
+          0,
+          0
+        ],
+        "event": [
+          "",
+          "tyre_change"
+        ]
+      }
+    }
+  ]
+}

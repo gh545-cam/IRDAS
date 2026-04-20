@@ -137,7 +137,9 @@ class RealVehicleSimulator:
                 # Safety clamps
                 state[0:2] = np.clip(state[0:2], -1e4, 1e4)
                 state[2] = np.remainder(state[2], 2*np.pi)
-                state[3:6] = np.clip(state[3:6], -50, 50)
+                state[3] = np.clip(state[3], -10, 95)
+                state[4] = np.clip(state[4], -35, 35)
+                state[5] = np.clip(state[5], -4, 4)
                 state[6:10] = np.clip(state[6:10], 0, 100)
                 state[10] = np.clip(state[10], 1000, 15500)
                 

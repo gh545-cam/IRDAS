@@ -229,7 +229,9 @@ def measurement_function_fixed(x: np.ndarray,
         dt:       timestep
  
     Returns:
-        z_pred: predicted measurement (9 elements)
+        z_pred: predicted measurement.
+            - 9 elements for legacy 13-state input
+            - 10 elements for augmented 14-state input (appends mass)
     """
     vx, vy, r = x[3], x[4], x[5]
  
@@ -241,7 +243,7 @@ def measurement_function_fixed(x: np.ndarray,
     ax_pred = dvx_dt - vy * r
     ay_pred = dvy_dt + vx * r
  
-    return np.array([
+    z_base = np.array([
         x[0],                              # x   (GPS)
         x[1],                              # y   (GPS)
         ax_pred,                           # ax  (IMU) — FIXED
@@ -252,6 +254,10 @@ def measurement_function_fixed(x: np.ndarray,
         x[10],                             # rpm (RPM sensor)
         np.mean(x[6:10]),                  # wheel speed average
     ])
+
+    if x.shape[0] > 13:
+        return np.concatenate([z_base, np.array([x[13]], dtype=np.float64)])
+    return z_base
  
  
 # ─────────────────────────────────────────────────────────────────────────

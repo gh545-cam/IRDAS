@@ -92,9 +92,14 @@ def get_engine_torque(rpm: float, params: dict = None) -> float:
     
     rpm_array = params.get('ENGINE_RPM', np.array([3000, 15500]))
     torque_array = params.get('ENGINE_TORQUE_NM', np.array([440, 340]))
+    idle_rpm = float(params.get('IDLE_RPM', 1000.0))
+    idle_torque = float(params.get('IDLE_TORQUE_NM', 110.0))
     
+    if rpm <= idle_rpm:
+        return idle_torque
     if rpm < rpm_array[0]:
-        return 0.0
+        # Smoothly ramp from idle torque into torque-map region.
+        return float(np.interp(rpm, [idle_rpm, rpm_array[0]], [idle_torque, torque_array[0]]))
     if rpm > rpm_array[-1]:
         return torque_array[-1]
     
@@ -128,7 +133,55 @@ def check_upshift(speed_mps: float, current_gear: int, params: dict = None) -> i
     return new_gear
 
 
-def check_grip_limit(Fx_demanded, Fy_demanded, Fz_kN, params: dict) -> tuple:
+def check_downshift(speed_mps: float, current_gear: int, throttle: float,
+                    engine_rpm: float, params: dict = None) -> int:
+    """
+    Check if downshift should occur based on speed, demand, and low-RPM lugging.
+    Uses hysteresis against upshift thresholds to avoid gear hunting.
+    """
+    if params is None:
+        params = globals()
+
+    if current_gear <= 1:
+        return 1
+
+    upshift_speeds = params.get('UPSHIFT_SPEED_KPH', {})
+    speed_kph = speed_mps * 3.6
+
+    prev_gear = current_gear - 1
+    prev_upshift = upshift_speeds.get(prev_gear, 80.0)
+    # Downshift threshold below the previous upshift point (hysteresis band).
+    downshift_threshold = 0.82 * prev_upshift
+
+    high_demand = throttle > 0.35
+    low_rpm = engine_rpm < 3000.0
+    too_slow_for_gear = speed_kph < downshift_threshold
+
+    # Target-speed kickdown floor: high desired pace should not stay in a tall gear.
+    target_speed = float(params.get('TARGET_SPEED_MPS', speed_mps))
+    if target_speed > 62.0:
+        min_gear_for_target = 4
+    elif target_speed > 50.0:
+        min_gear_for_target = 3
+    elif target_speed > 36.0:
+        min_gear_for_target = 2
+    else:
+        min_gear_for_target = 1
+
+    # Emergency relaunch downshift at low vehicle speed.
+    if speed_mps < 12.0 and current_gear > 2:
+        return current_gear - 1
+
+    if current_gear > min_gear_for_target and high_demand:
+        return current_gear - 1
+
+    if (high_demand and low_rpm) or too_slow_for_gear:
+        return prev_gear
+    return current_gear
+
+
+def check_grip_limit(Fx_demanded, Fy_demanded, Fz_kN,
+                     params_lat: dict, params_lon: dict | None = None) -> tuple:
     """
     Check if demanded forces exceed grip limit using friction circle constraint.
     Applies combined force saturation: sqrt((Fx/F_max)^2 + (Fy/F_max)^2) <= 1
@@ -137,17 +190,25 @@ def check_grip_limit(Fx_demanded, Fy_demanded, Fz_kN, params: dict) -> tuple:
         Fx_demanded: desired longitudinal force (N)
         Fy_demanded: desired lateral force (N)
         Fz_kN: normal force (kN)
-        params: tire parameter dict (TYRE_LAT or TYRE_LON)
+        params_lat: lateral tire parameter dict
+        params_lon: longitudinal tire parameter dict (optional)
     
     Returns:
         (Fx_limited, Fy_limited, utilization_factor)
         utilization_factor: 0-1, where 1 = at grip limit
     """
-    # Peak friction coefficient from tire parameters
-    a1 = params.get('a1', -0.10)
-    a2 = params.get('a2', 2.05)
-    mu_peak = a1 * Fz_kN + a2
-    mu_peak = max(mu_peak, 0.5)  # realistic minimum friction
+    # Conservative combined grip estimate from both lateral and longitudinal sets.
+    if params_lon is None:
+        params_lon = params_lat
+
+    a1_lat = params_lat.get('a1', -0.10)
+    a2_lat = params_lat.get('a2', 2.05)
+    a1_lon = params_lon.get('a1', -0.10)
+    a2_lon = params_lon.get('a2', 2.05)
+
+    mu_lat = max(a1_lat * Fz_kN + a2_lat, 0.5)
+    mu_lon = max(a1_lon * Fz_kN + a2_lon, 0.5)
+    mu_peak = min(mu_lat, mu_lon)
     
     # Maximum available grip force
     Fz_N = Fz_kN * 1000
@@ -251,7 +312,9 @@ def generate_trajectory(n_steps: int = 10000, dt: float = 0.05, params: dict = N
             # Clamp state values to prevent numerical explosion
             state[0:2] = np.clip(state[0:2], -1e4, 1e4)  # position
             state[2] = np.remainder(state[2], 2*np.pi)   # wrap angle
-            state[3:6] = np.clip(state[3:6], -50, 50)    # velocities
+            state[3] = np.clip(state[3], -10, 95)        # vx [m/s]
+            state[4] = np.clip(state[4], -35, 35)        # vy [m/s]
+            state[5] = np.clip(state[5], -4, 4)          # yaw rate [rad/s]
             state[6:10] = np.clip(state[6:10], 0, 100)   # wheel speeds
             state[10] = np.clip(state[10], 1000, 15500)  # RPM
             
@@ -438,8 +501,12 @@ def twin_track_model(state: np.ndarray, u: np.ndarray, dt: float = 0.05,
     alpha_rr = np.clip(alpha_rr, -20, 20)
     
     # ======================= LONGITUDINAL FORCES (FROM DRIVETRAIN) =======================
-    # Automatic gear shifting
-    new_gear = check_upshift(vx, int(gear), params)
+    # Automatic gear shifting (with downshift recovery + hysteresis).
+    # Use rounded gear to avoid floor-bias from tiny UKF sigma-point perturbations.
+    current_gear = int(np.clip(round(gear), 1, 8))
+    new_gear = check_downshift(vx, current_gear, float(throttle), float(engine_rpm), params)
+    if new_gear == current_gear:
+        new_gear = check_upshift(vx, current_gear, params)
     
     # Engine torque from throttle and RPM
     throttle_smooth = 0.95 * throttle_input + 0.05 * throttle  # smooth input
@@ -476,6 +543,11 @@ def twin_track_model(state: np.ndarray, u: np.ndarray, dt: float = 0.05,
     # Longitudinal tire forces from magic formula
     Fx_rl = pacejka_magic_formula(slip_ratio_rl * 100, Fz_rl_kN, TYRE_LON, 'longitudinal')
     Fx_rr = pacejka_magic_formula(slip_ratio_rr * 100, Fz_rr_kN, TYRE_LON, 'longitudinal')
+
+    # Apply driveline traction force to rear wheels so throttle generates propulsion.
+    drive_force_per_wheel = wheel_torque / max(tyre_radius, 1e-3) / 2.0
+    Fx_rl += drive_force_per_wheel
+    Fx_rr += drive_force_per_wheel
     
     # Front wheels: assume zero slip (no engine power directly)
     Fx_fl = 0
@@ -497,10 +569,10 @@ def twin_track_model(state: np.ndarray, u: np.ndarray, dt: float = 0.05,
     
     # ======================= GRIP LIMITING (FRICTION CIRCLE) =======================
     # Apply friction circle constraint at each wheel: combined demand must not exceed mu*Fz
-    Fx_fl, Fy_fl, util_fl = check_grip_limit(Fx_fl, Fy_fl, Fz_fl_kN, TYRE_LAT)
-    Fx_fr, Fy_fr, util_fr = check_grip_limit(Fx_fr, Fy_fr, Fz_fr_kN, TYRE_LAT)
-    Fx_rl, Fy_rl, util_rl = check_grip_limit(Fx_rl, Fy_rl, Fz_rl_kN, TYRE_LAT)
-    Fx_rr, Fy_rr, util_rr = check_grip_limit(Fx_rr, Fy_rr, Fz_rr_kN, TYRE_LAT)
+    Fx_fl, Fy_fl, util_fl = check_grip_limit(Fx_fl, Fy_fl, Fz_fl_kN, TYRE_LAT, TYRE_LON)
+    Fx_fr, Fy_fr, util_fr = check_grip_limit(Fx_fr, Fy_fr, Fz_fr_kN, TYRE_LAT, TYRE_LON)
+    Fx_rl, Fy_rl, util_rl = check_grip_limit(Fx_rl, Fy_rl, Fz_rl_kN, TYRE_LAT, TYRE_LON)
+    Fx_rr, Fy_rr, util_rr = check_grip_limit(Fx_rr, Fy_rr, Fz_rr_kN, TYRE_LAT, TYRE_LON)
     
     # Optional: log grip utilization for debugging
     # grip_util = {'FL': util_fl, 'FR': util_fr, 'RL': util_rl, 'RR': util_rr}
@@ -588,7 +660,9 @@ def twin_track_model(state: np.ndarray, u: np.ndarray, dt: float = 0.05,
     # Final safety clamps
     new_state[0:2] = np.clip(new_state[0:2], -1e4, 1e4)  # position
     new_state[2] = np.remainder(new_state[2], 2*np.pi)   # wrap yaw angle
-    new_state[3:6] = np.clip(new_state[3:6], -50, 50)    # velocities
+    new_state[3] = np.clip(new_state[3], -10, 95)        # vx [m/s]
+    new_state[4] = np.clip(new_state[4], -35, 35)        # vy [m/s]
+    new_state[5] = np.clip(new_state[5], -4, 4)          # yaw rate [rad/s]
     new_state[6:10] = np.clip(new_state[6:10], 0, 100)   # wheel speeds
     new_state[10] = np.clip(new_state[10], 1000, 15500)  # RPM
     new_state[11] = int(np.clip(new_gear, 1, 8))         # gear
